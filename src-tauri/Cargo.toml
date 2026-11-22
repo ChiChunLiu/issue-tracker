@@ -23,6 +23,7 @@ dirs = "7"
 rmcp = { version = "3.11", default-features = false, features = ["server", "schemars", "transport-io"] }
 schemars = "1.2"
 tokio = { version = "1", features = ["rt", "io-std"] }
+tauri-plugin-clipboard-manager = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"

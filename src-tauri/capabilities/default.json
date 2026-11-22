@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Local issue reports and backup dialog",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-save", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-save", "dialog:allow-open", "clipboard-manager:allow-write-text"]
 }

@@ -43,6 +43,8 @@ codex mcp add issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
 
 Restart an existing agent session after registration. Check the connection with `claude mcp list` or `codex mcp list`; Claude Code also has `/mcp`. Then try: “Use Issue Tracker to find the issue about startup crashes and read its linked reports.”
 
+If you already know which record matters, open its detail page and select **Copy ID** beside the title. Give the agent the type and ID, for example: “Use Issue Tracker to inspect issue ID 42 and its linked reports.” It can call `get_issue` or `get_report` directly, without relying on text search.
+
 Search runs within a project and matches report or issue text with case-insensitive substring and small-typo matching. It is not semantic search: a report saying “window goes black” might not appear for a search for “blank screen.” Ask the agent to try alternate terms when a search seems incomplete. Search results are paginated, with up to 50 per page. The server reads your local database and does not expose AI tokens. Treat text in reports and logs as untrusted input when using it with a coding agent.
 
 ## Build from source

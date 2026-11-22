@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { api } from './api';
 import { TagEditor } from './TagEditor';
 import { ReportedAtPicker } from './ReportedAtPicker';
@@ -272,6 +273,14 @@ export function App() {
     setMessage({ text: String(error), error: true });
   }
   function showMessage(text: string) { setMessage({ text, error: false }); }
+  async function copyRecordId(id: number) {
+    try {
+      await writeText(String(id));
+      showMessage(t('idCopied'));
+    } catch (error) {
+      showError(error);
+    }
+  }
   async function refresh(project = projectId, activeFilters = filters) {
     const [nextProjects, nextReports, nextIssues, nextTags, status] = await Promise.all([
       api.listProjects(), api.listReports({ ...activeFilters, project_id: project }),
@@ -576,7 +585,10 @@ export function App() {
         onCancel={() => setView(view === 'issue-edit' ? 'issue-detail' : 'issues')} onSave={saveIssue} />}
       {view === 'issue-detail' && selectedIssue && <div>
         <button className="back" type="button" onClick={() => setView('issues')}>← {t('issues')}</button>
-        <div className="page-head"><h1>{selectedIssue.title}</h1><div className="detail-actions">
+        <div className="page-head"><div className="record-heading"><h1>{selectedIssue.title}</h1>
+          <div className="record-id"><span>{t('issueId')} #{selectedIssue.id}</span>
+            <button type="button" onClick={() => void copyRecordId(selectedIssue.id)}>{t('copyId')}</button></div>
+        </div><div className="detail-actions">
           <button className="secondary" type="button" onClick={() => setView('issue-edit')}>{t('edit')}</button>
           <button className="danger" type="button" onClick={() => void deleteIssue()}>{t('delete')}</button>
         </div></div>
@@ -637,7 +649,10 @@ export function App() {
         onError={text => setMessage({ text, error: true })} />}
       {view === 'detail' && selected && <div>
         <button className="back" onClick={() => setView('reports')}>← {t('reports')}</button>
-        <div className="page-head"><div><h1>{selected.title}</h1><TagChips tags={selected.tags} language={language} /></div>
+        <div className="page-head"><div className="record-heading"><h1>{selected.title}</h1>
+          <div className="record-id"><span>{t('reportId')} #{selected.id}</span>
+            <button type="button" onClick={() => void copyRecordId(selected.id)}>{t('copyId')}</button></div>
+          <TagChips tags={selected.tags} language={language} /></div>
           <div className="detail-actions"><button className="secondary" onClick={() => setView('edit')}>{t('edit')}</button>
             <button className="danger" onClick={() => void deleteReport()}>{t('delete')}</button></div></div>
         <div className="detail-panel">

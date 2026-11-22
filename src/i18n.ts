@@ -3,6 +3,7 @@ export type Language = 'en' | 'zh-TW';
 const en = {
   appName: 'Issue Tracker', reports: 'Reports', issues: 'Issues', issue: 'Issue', projects: 'Projects', settings: 'Settings',
   newIssue: 'New issue', editIssue: 'Edit issue', issueDetail: 'Issue detail', saveIssue: 'Save issue',
+  issueId: 'Issue ID', reportId: 'Report ID', copyId: 'Copy ID', idCopied: 'ID copied.',
   noIssues: 'No issues yet', issueSaved: 'Issue saved.', issueDeleted: 'Issue deleted.',
   deleteIssueConfirm: 'Delete this issue? Its reports will remain and become unlinked.',
   state: 'State', investigating: 'Investigating', prOpened: 'PR opened', prMerged: 'PR merged', released: 'Released',
@@ -68,6 +69,7 @@ export type TranslationKey = keyof typeof en;
 
 const zhTW: Record<TranslationKey, string> = {
   appName: '問題追蹤器', reports: '報告', issues: '問題', issue: '問題', projects: '專案', settings: '設定',
+  issueId: '問題 ID', reportId: '報告 ID', copyId: '複製 ID', idCopied: '已複製 ID。',
   newIssue: '新增問題', editIssue: '編輯問題', issueDetail: '問題詳情', saveIssue: '儲存問題',
   noIssues: '尚無問題', issueSaved: '已儲存問題。', issueDeleted: '已刪除問題。',
   deleteIssueConfirm: '刪除此問題？相關報告會保留並解除連結。',

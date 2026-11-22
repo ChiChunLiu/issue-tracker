@@ -1353,6 +1353,7 @@ pub fn run() {
     }));
     builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             if let Err(error) = install_mcp_launcher() {
