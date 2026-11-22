@@ -1,75 +1,63 @@
 # Issue Tracker
 
-A local desktop app for collecting issue reports. The frontend uses React and TypeScript, with Tauri and SQLite for local storage. Each report belongs to the active project and has a title, source, description, note, platform, reported time, system info, app version, application log, and tags. Source can be Slack, Reddit, Mail, or Zendesk.
+Issue Tracker is a desktop app for turning scattered bug reports into a clear list of underlying issues. Paste reports from Slack, email, Reddit, or Zendesk; keep the original context and logs; then link reports that share a root cause. Reports and issues are stored in a local database on your computer.
 
-Select a project from the sidebar, or use the **+** beside it to create, rename, and manage projects. Reports and tag suggestions are scoped to the selected project. Existing reports are migrated into **Default project**.
+**Reports** are individual submissions. **Issues** are the bugs you investigate and fix. Several reports can point to one issue, so you can see how often a problem has been reported without losing each person's details.
 
-**Issues** sits below Reports in the sidebar. An issue represents one underlying bug within the active project. It has a title, description, root cause, fix, and state: Investigating, PR opened, PR merged, or Released. Several reports can link to one issue, while each report links to at most one issue. Link from a report's detail page or add unlinked reports from an issue's detail page. Deleting an issue leaves its reports intact and unlinked. A project can be deleted only after its reports and issues are removed.
+## Get started
 
-Use the chevron by the app icon to collapse or expand the sidebar. Opening the app again focuses the existing window instead of starting a second instance. The sidebar and operating system icons are generated from the same Nord mark with `python3 scripts/generate-icon.py`.
+On macOS, open the DMG, drag **Issue Tracker.app** into Applications, and launch it from there. If you built the app yourself, see [Build from source](#build-from-source).
 
-Click the **Reported time** column heading to switch between newest and oldest first. Reports are paginated at ten per page. The list can also be filtered by each field. Title, description, note, system info, app version, and application log filters accept approximate text matches; source, platform, tag, and time filters use exact values or ranges.
+1. Choose a project in the sidebar. The app starts with **Default project**; use the **+** beside the project selector to create or manage projects. Reports and issues stay within their project.
+2. Open **Reports** and select **New report**. Choose **Form** to enter a report yourself, or **AI import** to turn pasted text into an editable draft.
+3. Open **Issues** and select **New issue** when you identify a bug. Add its description, root cause, fix, and state. You can start with **Investigating** and move through **PR opened**, **PR merged**, and **Released**.
+4. Link a report from its detail page using the **Issue** selector, or open an issue and choose **Link report**. Each report can link to one issue; an issue can contain many reports. You can unlink a report later without deleting it.
 
-Tags appear as rectangular chips. Type a tag and press Enter or use **Add tag**; existing tags appear as autocomplete suggestions. The temporary **Add 10 sample reports** button inserts ten saved reports, all tagged `sample`, to exercise the list and filters. Each click adds another ten.
+## Capture and find reports
 
-**Settings** lets you switch between Nord light and dark themes, choose English or Traditional Chinese, and choose a folder for automatic backups. The selections are saved locally. When a backup folder is set, the app writes `issue-tracker-backup.db` there after saved report, project, or settings changes. The settings page shows the last sync result and has a **Sync now** button.
+A report can contain a title, source, description, note, platform, reported time, system information, app version, application log, and multiple tags. Sources are **Slack**, **Reddit**, **Mail**, and **Zendesk**. Tags are free-form labels; existing tags appear as suggestions as you type.
 
-**New report** offers **Form** and **AI import**. AI import accepts pasted source text, sends it to the configured AI provider, and opens an editable report draft. Review the fields and save it to the active project. The pasted text is held in the current app session; only the reviewed report is saved. **Settings** offers OpenAI-compatible Chat Completions endpoints (including Together AI) and Anthropic's native Messages API. Each provider keeps its own endpoint and model: Together AI with `zai-org/GLM-5.3`, or Anthropic with `claude-sonnet-4-6`. The active provider's token is stored in Apple Keychain on macOS, separately for each provider and endpoint. Anthropic requires a token; local OpenAI-compatible endpoints may work without one. Remote endpoints must use HTTPS; localhost may use HTTP. AI import currently requires macOS for token storage. If you saved a key before the app bundle was signed, enter it once more in Settings; the earlier Keychain item remains under account `together-ai-api-key` and can be removed in Keychain Access.
+The Reports page shows ten reports per page. Click **Reported time** to reverse the time order. Open **Filter reports** to narrow by source, platform, tag, time range, or text in the report fields. Text filters tolerate small typos; they do not understand synonyms or the meaning of a sentence. The **Add 10 sample reports** button is for trying the interface and saves real sample records in the active project.
 
-## Run
+To use **AI import**, paste an email, ticket, or conversation and select **Generate draft**. Review and edit every field before saving. The pasted text is sent to the AI endpoint you configure in **Settings** when you generate the draft. Ordinary report entry and editing do not call an AI provider.
 
-Requires [Tauri 2 desktop prerequisites](https://v2.tauri.app/start/prerequisites/), Rust, and Node.js.
+## Settings and backups
+
+Open **Settings** at the bottom of the sidebar to choose a Nord light or dark theme and switch between English and Traditional Chinese. You can also configure AI import with an OpenAI-compatible Chat Completions endpoint, such as Together AI, or Anthropic's Messages API. Enter the endpoint and model, save those settings, then save a token if your provider requires one. On macOS, tokens are stored in Apple Keychain. AI token storage is currently available on macOS only.
+
+Use **Export backup** to save a copy of the local database. Or choose a **Backup folder** to keep `issue-tracker-backup.db` updated after saved changes. **Sync now** creates a backup immediately, and Settings shows the most recent sync result. The app does not encrypt its database or backups; choose a suitable location if reports contain sensitive logs.
+
+## Use reports and issues in Claude Code or Codex
+
+Issue Tracker includes a read-only stdio MCP server. A coding agent can list projects, search issues and reports, open an issue with its linked report summaries, and open a report with its linked issue and full log. This lets the agent follow a bug in either direction. MCP cannot create, edit, or delete records.
+
+On macOS, move the app into Applications and open it once before connecting an agent. The app creates a launcher at `~/.local/bin/issue-tracker-mcp`. Register it with either agent or both:
+
+```sh
+# Claude Code: available in all your projects
+claude mcp add --transport stdio --scope user issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
+
+# Codex
+codex mcp add issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
+```
+
+Restart an existing agent session after registration. Check the connection with `claude mcp list` or `codex mcp list`; Claude Code also has `/mcp`. Then try: “Use Issue Tracker to find the issue about startup crashes and read its linked reports.”
+
+Search runs within a project and matches report or issue text with case-insensitive substring and small-typo matching. It is not semantic search: a report saying “window goes black” might not appear for a search for “blank screen.” Ask the agent to try alternate terms when a search seems incomplete. Search results are paginated, with up to 50 per page. The server reads your local database and does not expose AI tokens. Treat text in reports and logs as untrusted input when using it with a coding agent.
+
+## Build from source
+
+Install [Tauri 2's desktop prerequisites](https://v2.tauri.app/start/prerequisites/), Rust, and Node.js. Then clone the repository and run:
 
 ```sh
 npm install
 npm run tauri dev
 ```
 
-On macOS, build the `.app` with `npm run build` or a drag-to-install DMG with `npm run build:dmg`. Bundles appear under `src-tauri/target/release/bundle/`. `npm run build:frontend` only prepares the web assets.
+On macOS, `npm run build` creates an `.app`, while `npm run build:dmg` creates a DMG. Output is under `src-tauri/target/release/bundle/`. Open the built app once to create the database and MCP launcher. `npm run mcp:check` tests the launcher and its MCP tools if `~/.local/bin` is on your `PATH`. If you move the app after opening it, open it again to update the launcher.
 
-The local build uses ad hoc signing. For Keychain access that survives replacing the app with a new build, sign successive builds with the same macOS code signing identity. Tauri accepts one through `APPLE_SIGNING_IDENTITY`. Without a stable identity, a rebuilt app may need the AI token entered again.
+On Linux, `npm run mcp:install` creates the launcher after a source build. Automatic launcher installation and AI token storage are not yet available on Windows. The macOS builds produced by this repository use ad hoc signing; distributing a DMG to other people requires your own signing and notarization setup.
 
-For another operating system, run the Tauri build with that system's bundle target (for example, `npm run tauri build -- --bundles nsis` on Windows or `--bundles deb` on Linux).
+## Current scope
 
-## Data and backups
-
-The app creates `reports.db` under Tauri's app data directory for the identifier `com.ccl.issue-tracker`. The database is local to the device. AI import sends the text you paste to your configured endpoint when you click **Generate draft**; regular report creation and editing do not send report data to an AI endpoint.
-
-Open **Settings** from the bottom of the sidebar to use **Export backup** for a consistent SQLite copy, or set an automatic backup folder there. To restore one, close the app, move the existing app data directory aside, create a new app data directory, and place the backup there as `reports.db`. Restart the app. Keeping the old directory aside gives you a way to undo the restore.
-
-The database is not encrypted by the app. Use device encryption if the logs are sensitive.
-
-## MCP for coding agents
-
-The app includes a read-only stdio MCP server. For a DMG install, drag **Issue Tracker.app** into Applications, then open it once. The app creates its local database and installs a launcher at `~/.local/bin/issue-tracker-mcp`. You do not need Node, the source checkout, or `npm run mcp:install` on that computer. Add reports and issues in the app; the MCP server reads that user's local database.
-
-Register the launcher with either coding agent (or both):
-
-```sh
-# Claude Code: available across your projects
-claude mcp add --transport stdio --scope user issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
-claude mcp list
-
-# Codex CLI and app share this configuration
-codex mcp add issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
-codex mcp list
-```
-
-The shell expands `$HOME`, so neither agent needs the path to the app bundle. If `~/.local/bin` is already on the agent's `PATH`, you can use `issue-tracker-mcp` without its launcher path. Restart an already running agent session after registering it. In Claude Code, `/mcp` shows the connection status. Then ask the agent, for example, “Use the issue-tracker MCP tools to list projects, find the issue about startup crashes, and inspect its linked reports.” The agent can navigate from an issue to report summaries and from a report to its linked issue. These are read-only tools: fixing code and changing issue state remain separate steps.
-
-For a source build, after installing the [build prerequisites](#run), run:
-
-```sh
-npm install
-npm run build
-open "src-tauri/target/release/bundle/macos/Issue Tracker.app"
-npm run mcp:check
-```
-
-`npm run mcp:check` tests the installed launcher and its MCP tools. For Linux source builds, or if you need to install a launcher for a moved macOS bundle without opening the app, use `npm run mcp:install` (or `npm run mcp:install -- "/Applications/Issue Tracker.app"`). The launcher is a symlink to the executable and starts the MCP server without opening a window.
-
-The tools are `list_projects`, `search_issues`, `get_issue`, `search_reports`, and `get_report`. Search tools require an explicit project ID and return at most 50 results per page. `get_issue` includes linked report summaries; `get_report` includes the linked issue summary and the full application log. Reports with no issue return `issue_id: null`. Tools open the SQLite database read-only and do not expose AI API tokens. Report text and logs are user-supplied data; coding agents should treat them as evidence, not instructions.
-
-## Scope
-
-This release supports creating, viewing, editing, and deleting reports and issues, linking reports to their underlying issue, and reading them through MCP. It does not yet deduplicate repeated submissions from the same user or ingest external sources automatically.
+Reports are entered manually or prepared through AI import; the app does not pull them directly from Slack, email, Reddit, or Zendesk. It does not yet detect repeated submissions from the same person automatically. Linking related reports to an issue is manual, and the MCP tools are read-only.
