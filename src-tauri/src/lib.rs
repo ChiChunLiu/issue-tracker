@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, State};
+use uuid::Uuid;
 
 mod ai_import;
 mod mcp;
@@ -113,6 +114,7 @@ struct ReportFilters {
 #[derive(Debug, Serialize, JsonSchema)]
 struct ReportSummary {
     id: i64,
+    public_id: String,
     project_id: i64,
     title: String,
     platform: String,
@@ -120,11 +122,13 @@ struct ReportSummary {
     reported_at: String,
     tags: Vec<String>,
     issue_id: Option<i64>,
+    issue_public_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct Report {
     id: i64,
+    public_id: String,
     project_id: i64,
     title: String,
     source: String,
@@ -137,6 +141,7 @@ struct Report {
     reported_at: String,
     tags: Vec<String>,
     issue_id: Option<i64>,
+    issue_public_id: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -154,6 +159,7 @@ struct IssueInput {
 #[derive(Debug, Serialize, JsonSchema)]
 struct Issue {
     id: i64,
+    public_id: String,
     project_id: i64,
     title: String,
     description: String,
@@ -170,128 +176,89 @@ fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    match version {
-        0 => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE reports (
-               id INTEGER PRIMARY KEY,
-               title TEXT NOT NULL,
-               platform TEXT NOT NULL,
-               system_info TEXT NOT NULL DEFAULT '',
-               app_version TEXT NOT NULL DEFAULT '',
-               application_log TEXT NOT NULL DEFAULT '',
-               reported_at TEXT NOT NULL,
-               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             );
-             CREATE TABLE report_tags (
-               report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
-               tag TEXT NOT NULL COLLATE NOCASE,
-               PRIMARY KEY (report_id, tag)
-             );
-             CREATE INDEX reports_reported_at ON reports(reported_at);
-             CREATE INDEX report_tags_tag ON report_tags(tag);
-             PRAGMA user_version = 2;
-             COMMIT;",
-        )?,
-        1 => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE reports ADD COLUMN platform TEXT NOT NULL DEFAULT '';
-             ALTER TABLE reports ADD COLUMN reported_at TEXT NOT NULL DEFAULT '';
-             UPDATE reports SET reported_at = created_at;
-             CREATE TABLE report_tags (
-               report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
-               tag TEXT NOT NULL COLLATE NOCASE,
-               PRIMARY KEY (report_id, tag)
-             );
-             CREATE INDEX reports_reported_at ON reports(reported_at);
-             CREATE INDEX report_tags_tag ON report_tags(tag);
-             PRAGMA user_version = 2;
-             COMMIT;",
-        )?,
-        2 | 3 | 4 | 5 | 6 | 7 => (),
-        _ => return Err(rusqlite::Error::InvalidQuery),
+    if version == 8 {
+        return Ok(connection);
     }
-    if version <= 2 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE projects (
-               id INTEGER PRIMARY KEY,
-               name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             );
-             INSERT INTO projects (id, name) VALUES (1, 'Default project');
-             ALTER TABLE reports ADD COLUMN project_id INTEGER REFERENCES projects(id);
-             UPDATE reports SET project_id = 1;
-             CREATE INDEX reports_project_time ON reports(project_id, reported_at);
-             CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO app_settings (key, value) VALUES
-               ('theme', 'light'), ('language', 'en'), ('backup_folder', ''),
-               ('selected_project_id', '1');
-             PRAGMA user_version = 3;
-             COMMIT;",
-        )?;
+    if !(0..=7).contains(&version) {
+        return Err(rusqlite::Error::InvalidQuery);
     }
-    if version <= 3 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE reports ADD COLUMN source TEXT NOT NULL DEFAULT '';
-             ALTER TABLE reports ADD COLUMN description TEXT NOT NULL DEFAULT '';
-             ALTER TABLE reports ADD COLUMN note TEXT NOT NULL DEFAULT '';
-             PRAGMA user_version = 4;
-             COMMIT;",
-        )?;
+    if version > 0 && path != std::path::Path::new(":memory:") {
+        let backup = path.with_file_name(format!("reports-before-uuid-{}.db", Uuid::new_v4()));
+        connection.backup(MAIN_DB, &backup, None::<fn(rusqlite::backup::Progress)>)?;
     }
-    if version <= 4 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             INSERT INTO app_settings (key, value) VALUES
-               ('ai_endpoint', 'https://api.together.ai/v1/chat/completions'),
-               ('ai_model', 'zai-org/GLM-5.3');
-             PRAGMA user_version = 5;
-             COMMIT;",
-        )?;
-    }
-    if version <= 5 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             INSERT INTO app_settings (key, value) VALUES
-               ('ai_provider', 'openai-compatible'),
-               ('anthropic_endpoint', 'https://api.anthropic.com/v1/messages'),
-               ('anthropic_model', 'claude-sonnet-4-6');
-             PRAGMA user_version = 6;
-             COMMIT;",
-        )?;
-    }
-    if version <= 6 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE issues (
-               id INTEGER PRIMARY KEY,
-               project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-               title TEXT NOT NULL,
-               description TEXT NOT NULL DEFAULT '',
-               root_cause TEXT NOT NULL DEFAULT '',
-               fix TEXT NOT NULL DEFAULT '',
-               state TEXT NOT NULL CHECK(state IN ('investigating', 'pr-opened', 'pr-merged', 'released')),
-               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             );
-             CREATE INDEX issues_project_updated ON issues(project_id, updated_at DESC);
-             ALTER TABLE reports ADD COLUMN issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL;
-             CREATE INDEX reports_issue_id ON reports(issue_id);
-             CREATE TRIGGER report_issue_project_insert BEFORE INSERT ON reports
-             WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
-               SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
-             ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
-             CREATE TRIGGER report_issue_project_update BEFORE UPDATE OF issue_id, project_id ON reports
-             WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
-               SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
-             ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
-             PRAGMA user_version = 7;
-             COMMIT;",
-        )?;
-    }
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP TABLE IF EXISTS report_tags;
+         DROP TABLE IF EXISTS reports;
+         DROP TABLE IF EXISTS issues;
+         DROP TABLE IF EXISTS projects;
+         DROP TABLE IF EXISTS app_settings;
+         CREATE TABLE projects (
+           id INTEGER PRIMARY KEY,
+           name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         INSERT INTO projects (id, name) VALUES (1, 'Default project');
+         CREATE TABLE issues (
+           id INTEGER PRIMARY KEY,
+           public_id TEXT NOT NULL UNIQUE,
+           project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+           title TEXT NOT NULL,
+           description TEXT NOT NULL DEFAULT '',
+           root_cause TEXT NOT NULL DEFAULT '',
+           fix TEXT NOT NULL DEFAULT '',
+           state TEXT NOT NULL CHECK(state IN ('investigating', 'pr-opened', 'pr-merged', 'released')),
+           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         CREATE INDEX issues_project_updated ON issues(project_id, updated_at DESC);
+         CREATE TABLE reports (
+           id INTEGER PRIMARY KEY,
+           public_id TEXT NOT NULL UNIQUE,
+           project_id INTEGER NOT NULL REFERENCES projects(id),
+           issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+           title TEXT NOT NULL,
+           source TEXT NOT NULL DEFAULT '',
+           description TEXT NOT NULL DEFAULT '',
+           note TEXT NOT NULL DEFAULT '',
+           platform TEXT NOT NULL,
+           system_info TEXT NOT NULL DEFAULT '',
+           app_version TEXT NOT NULL DEFAULT '',
+           application_log TEXT NOT NULL DEFAULT '',
+           reported_at TEXT NOT NULL,
+           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         );
+         CREATE INDEX reports_project_time ON reports(project_id, reported_at);
+         CREATE INDEX reports_issue_id ON reports(issue_id);
+         CREATE TABLE report_tags (
+           report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+           tag TEXT NOT NULL COLLATE NOCASE,
+           PRIMARY KEY (report_id, tag)
+         );
+         CREATE INDEX report_tags_tag ON report_tags(tag);
+         CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO app_settings (key, value) VALUES
+           ('theme', 'light'), ('language', 'en'), ('backup_folder', ''),
+           ('selected_project_id', '1'),
+           ('ai_endpoint', 'https://api.together.ai/v1/chat/completions'),
+           ('ai_model', 'zai-org/GLM-5.3'),
+           ('ai_provider', 'openai-compatible'),
+           ('anthropic_endpoint', 'https://api.anthropic.com/v1/messages'),
+           ('anthropic_model', 'claude-sonnet-4-6');
+         CREATE TRIGGER report_issue_project_insert BEFORE INSERT ON reports
+         WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
+           SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
+         ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
+         CREATE TRIGGER report_issue_project_update BEFORE UPDATE OF issue_id, project_id ON reports
+         WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
+           SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
+         ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
+         PRAGMA user_version = 8;
+         COMMIT;",
+    )?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(connection)
 }
 
@@ -369,12 +336,14 @@ fn read_report(connection: &Connection, id: i64) -> rusqlite::Result<Option<Repo
     let report = connection
         .query_row(
             "SELECT id, project_id, title, platform, system_info, app_version, application_log,
-                    reported_at, created_at, updated_at, source, description, note, issue_id
+                    reported_at, created_at, updated_at, source, description, note, issue_id,
+                    public_id, (SELECT public_id FROM issues WHERE id = reports.issue_id)
              FROM reports WHERE id = ?1",
             [id],
             |row| {
                 Ok(Report {
                     id: row.get(0)?,
+                    public_id: row.get(14)?,
                     project_id: row.get(1)?,
                     title: row.get(2)?,
                     source: row.get(10)?,
@@ -387,6 +356,7 @@ fn read_report(connection: &Connection, id: i64) -> rusqlite::Result<Option<Repo
                     reported_at: row.get(7)?,
                     tags: Vec::new(),
                     issue_id: row.get(13)?,
+                    issue_public_id: row.get(15)?,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                 })
@@ -420,10 +390,11 @@ fn insert_report(connection: &mut Connection, input: ReportInput) -> Result<Repo
     transaction
         .execute(
             "INSERT INTO reports
-               (project_id, title, platform, system_info, app_version, application_log, reported_at,
+               (public_id, project_id, title, platform, system_info, app_version, application_log, reported_at,
                 source, description, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
+                Uuid::new_v4().to_string(),
                 input.project_id,
                 input.title.trim(),
                 input.platform,
@@ -584,9 +555,10 @@ fn insert_sample_reports(connection: &mut Connection, project_id: i64) -> rusqli
         let modifier = format!("-{hours_ago} hours");
         transaction.execute(
             "INSERT INTO reports
-               (project_id, title, platform, system_info, app_version, application_log, reported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?7))",
+               (public_id, project_id, title, platform, system_info, app_version, application_log, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?8))",
             params![
+                Uuid::new_v4().to_string(),
                 project_id,
                 title,
                 platform,
@@ -709,7 +681,8 @@ fn query_reports(
     let mut query = connection.prepare(
         "SELECT id, project_id, title, platform, system_info, app_version,
                 CASE WHEN ?1 = '' THEN '' ELSE application_log END, reported_at,
-                source, description, note, issue_id
+                source, description, note, issue_id, public_id,
+                (SELECT public_id FROM issues WHERE id = reports.issue_id)
          FROM reports ORDER BY reported_at DESC, id DESC",
     )?;
     let rows = query.query_map([&filters.application_log], |row| {
@@ -726,6 +699,8 @@ fn query_reports(
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
             row.get::<_, Option<i64>>(11)?,
+            row.get::<_, String>(12)?,
+            row.get::<_, Option<String>>(13)?,
         ))
     })?;
     let mut reports = Vec::new();
@@ -743,6 +718,8 @@ fn query_reports(
             description,
             note,
             issue_id,
+            public_id,
+            issue_public_id,
         ) = row?;
         let report_tags = tags.get(&id).cloned().unwrap_or_default();
         if filters.project_id != 0 && filters.project_id != project_id
@@ -765,6 +742,7 @@ fn query_reports(
         }
         reports.push(ReportSummary {
             id,
+            public_id,
             project_id,
             title,
             platform,
@@ -772,6 +750,7 @@ fn query_reports(
             reported_at,
             tags: report_tags,
             issue_id,
+            issue_public_id,
         });
     }
     if filters.oldest_first {
@@ -783,6 +762,7 @@ fn query_reports(
 fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
     Ok(Issue {
         id: row.get(0)?,
+        public_id: row.get(10)?,
         project_id: row.get(1)?,
         title: row.get(2)?,
         description: row.get(3)?,
@@ -796,7 +776,7 @@ fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
 }
 
 const ISSUE_SELECT: &str = "SELECT i.id, i.project_id, i.title, i.description, i.root_cause,
-    i.fix, i.state, COUNT(r.id), i.created_at, i.updated_at
+    i.fix, i.state, COUNT(r.id), i.created_at, i.updated_at, i.public_id
     FROM issues i LEFT JOIN reports r ON r.issue_id = i.id";
 
 fn read_issue(connection: &Connection, id: i64) -> rusqlite::Result<Option<Issue>> {
@@ -840,9 +820,10 @@ fn insert_issue(connection: &Connection, input: IssueInput) -> Result<Issue, Str
     validate_issue(&input)?;
     connection
         .execute(
-            "INSERT INTO issues (project_id, title, description, root_cause, fix, state)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO issues (public_id, project_id, title, description, root_cause, fix, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
+                Uuid::new_v4().to_string(),
                 input.project_id,
                 input.title.trim(),
                 input.description,
@@ -1439,6 +1420,7 @@ mod tests {
         );
         assert_eq!(settings.anthropic_model, "claude-sonnet-4-6");
         let created = insert_report(&mut connection, input("Freeze on display")).unwrap();
+        assert!(Uuid::parse_str(&created.public_id).is_ok());
         assert_eq!(created.tags, vec!["Display", "freeze"]);
         assert_eq!(created.platform, "macOS");
         assert_eq!(created.source, "Slack");
@@ -1494,6 +1476,7 @@ mod tests {
         let mut updated = input("Updated");
         updated.tags = vec!["Crash".to_owned()];
         let updated = change_report(&mut connection, created.id, updated).unwrap();
+        assert_eq!(updated.public_id, created.public_id);
         assert_eq!(updated.tags, vec!["Crash"]);
     }
 
@@ -1528,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_reports_migrate_without_losing_data() {
+    fn old_database_is_backed_up_then_reset_for_public_uuids() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1552,15 +1535,31 @@ mod tests {
                 .unwrap();
         }
         let connection = open_database(&path).unwrap();
-        let report = read_report(&connection, 1).unwrap().unwrap();
-        assert_eq!(report.title, "Old report");
-        assert_eq!(report.reported_at, report.created_at);
-        assert_eq!(report.platform, "");
-        assert_eq!(report.source, "");
-        assert_eq!(report.description, "");
-        assert_eq!(report.note, "");
-        assert_eq!(report.issue_id, None);
+        assert!(query_reports(&connection, &ReportFilters::default())
+            .unwrap()
+            .is_empty());
         assert!(issues_for_project(&connection, 1).unwrap().is_empty());
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        let backup = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("reports-before-uuid-")
+            })
+            .unwrap();
+        let original = Connection::open(backup).unwrap();
+        let title: String = original
+            .query_row("SELECT title FROM reports WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Old report");
         drop(connection);
         std::fs::remove_dir_all(directory).unwrap();
     }

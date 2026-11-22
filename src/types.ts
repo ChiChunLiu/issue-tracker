@@ -13,6 +13,7 @@ export interface Project {
 
 export interface ReportSummary {
   id: number;
+  public_id: string;
   project_id: number;
   title: string;
   platform: Platform | '';
@@ -20,11 +21,13 @@ export interface ReportSummary {
   reported_at: string;
   tags: string[];
   issue_id: number | null;
+  issue_public_id: string | null;
 }
 
 export type IssueState = 'investigating' | 'pr-opened' | 'pr-merged' | 'released';
 export interface Issue {
   id: number;
+  public_id: string;
   project_id: number;
   title: string;
   description: string;

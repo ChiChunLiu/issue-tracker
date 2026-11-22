@@ -273,9 +273,9 @@ export function App() {
     setMessage({ text: String(error), error: true });
   }
   function showMessage(text: string) { setMessage({ text, error: false }); }
-  async function copyRecordId(id: number) {
+  async function copyRecordId(id: string) {
     try {
-      await writeText(String(id));
+      await writeText(id);
       showMessage(t('idCopied'));
     } catch (error) {
       showError(error);
@@ -586,8 +586,8 @@ export function App() {
       {view === 'issue-detail' && selectedIssue && <div>
         <button className="back" type="button" onClick={() => setView('issues')}>← {t('issues')}</button>
         <div className="page-head"><div className="record-heading"><h1>{selectedIssue.title}</h1>
-          <div className="record-id"><span>{t('issueId')} #{selectedIssue.id}</span>
-            <button type="button" onClick={() => void copyRecordId(selectedIssue.id)}>{t('copyId')}</button></div>
+          <div className="record-id"><span>{t('issueId')} {selectedIssue.public_id}</span>
+            <button type="button" onClick={() => void copyRecordId(selectedIssue.public_id)}>{t('copyId')}</button></div>
         </div><div className="detail-actions">
           <button className="secondary" type="button" onClick={() => setView('issue-edit')}>{t('edit')}</button>
           <button className="danger" type="button" onClick={() => void deleteIssue()}>{t('delete')}</button>
@@ -650,8 +650,8 @@ export function App() {
       {view === 'detail' && selected && <div>
         <button className="back" onClick={() => setView('reports')}>← {t('reports')}</button>
         <div className="page-head"><div className="record-heading"><h1>{selected.title}</h1>
-          <div className="record-id"><span>{t('reportId')} #{selected.id}</span>
-            <button type="button" onClick={() => void copyRecordId(selected.id)}>{t('copyId')}</button></div>
+          <div className="record-id"><span>{t('reportId')} {selected.public_id}</span>
+            <button type="button" onClick={() => void copyRecordId(selected.public_id)}>{t('copyId')}</button></div>
           <TagChips tags={selected.tags} language={language} /></div>
           <div className="detail-actions"><button className="secondary" onClick={() => setView('edit')}>{t('edit')}</button>
             <button className="danger" onClick={() => void deleteReport()}>{t('delete')}</button></div></div>
