@@ -2,7 +2,9 @@
 
 A local desktop app for collecting issue reports. The frontend uses React and TypeScript, with Tauri and SQLite for local storage. Each report belongs to the active project and has a title, source, description, note, platform, reported time, system info, app version, application log, and tags. Source can be Slack, Reddit, Mail, or Zendesk.
 
-Select a project from the sidebar, or use the **+** beside it to create, rename, and manage projects. Reports and tag suggestions are scoped to the selected project. Existing reports are migrated into **Default project**. An empty project can be deleted; move or delete its reports first if it contains any.
+Select a project from the sidebar, or use the **+** beside it to create, rename, and manage projects. Reports and tag suggestions are scoped to the selected project. Existing reports are migrated into **Default project**.
+
+**Issues** sits below Reports in the sidebar. An issue represents one underlying bug within the active project. It has a title, description, root cause, fix, and state: Investigating, PR opened, PR merged, or Released. Several reports can link to one issue, while each report links to at most one issue. Link from a report's detail page or add unlinked reports from an issue's detail page. Deleting an issue leaves its reports intact and unlinked. A project can be deleted only after its reports and issues are removed.
 
 Use the chevron by the app icon to collapse or expand the sidebar. Opening the app again focuses the existing window instead of starting a second instance. The sidebar and operating system icons are generated from the same Nord mark with `python3 scripts/generate-icon.py`.
 
@@ -39,4 +41,4 @@ The database is not encrypted by the app. Use device encryption if the logs are 
 
 ## Scope
 
-This release supports creating, viewing, editing, and deleting reports. It does not yet group reports into occurrences or issues, deduplicate submissions, track fix state, or ingest external sources.
+This release supports creating, viewing, editing, and deleting reports and issues, and linking reports to their underlying issue. It does not yet deduplicate repeated submissions from the same user or ingest external sources automatically. MCP integration is planned for later.

@@ -8,6 +8,7 @@ export interface Project {
   id: number;
   name: string;
   report_count: number;
+  issue_count: number;
 }
 
 export interface ReportSummary {
@@ -18,7 +19,23 @@ export interface ReportSummary {
   app_version: string;
   reported_at: string;
   tags: string[];
+  issue_id: number | null;
 }
+
+export type IssueState = 'investigating' | 'pr-opened' | 'pr-merged' | 'released';
+export interface Issue {
+  id: number;
+  project_id: number;
+  title: string;
+  description: string;
+  root_cause: string;
+  fix: string;
+  state: IssueState;
+  report_count: number;
+  created_at: string;
+  updated_at: string;
+}
+export type IssueInput = Pick<Issue, 'project_id' | 'title' | 'description' | 'root_cause' | 'fix' | 'state'>;
 
 export interface Report extends ReportSummary {
   source: ReportSource;

@@ -287,6 +287,47 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .ai-config-form label { font-size: 13px; font-weight: 650; color: var(--text-soft); }
 .ai-key-row { align-items: flex-start; }
 
+.issue-list { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 10px; }
+.issue-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 125px; align-items: center; gap: 22px;
+  min-width: 0; width: 100%; min-height: 78px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); color: var(--text); padding: 16px 20px; text-align: left; }
+.issue-row:hover { border-color: var(--nord9); background: var(--surface-hover); }
+.issue-row-main { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; width: 100%; gap: 5px; }
+.issue-row-main strong, .issue-row-description { display: block; min-width: 0; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.issue-row-main strong { font-size: 16px; }
+.issue-row-description { color: var(--text-soft); font-size: 13px; }
+.issue-report-count { color: var(--text-soft); font-size: 13px; text-align: right; }
+.state-badge { display: inline-flex; width: fit-content; border: 1px solid var(--tag-border); border-radius: 5px;
+  background: var(--tag-bg); color: var(--tag-text); padding: 5px 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.state-released { border-color: var(--nord7); background: #8fbcbb25; color: var(--text); }
+.state-investigating { border-color: var(--border); background: var(--surface-muted); color: var(--text-soft); }
+.issue-detail-panel { max-width: 850px; }
+.issue-linked-reports { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 9px; margin-bottom: 16px; }
+.issue-linked-report { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+  gap: 13px; min-width: 0; width: 100%; border: 1px solid var(--border); border-radius: 7px; padding: 9px 12px; }
+.issue-linked-report .report-title { display: block; min-width: 0; width: 100%; text-align: left; }
+.issue-linked-report > span { color: var(--text-soft); font-size: 12px; white-space: nowrap; }
+.issue-linked-report .secondary { min-height: 30px; padding: 5px 8px; }
+.issue-link-form { display: flex; gap: 9px; }
+.issue-link-form select, .issue-select { min-width: 0; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface); color: var(--text); padding: 9px 11px; }
+.issue-link-form select { flex: 1; }
+.issue-select { width: min(100%, 420px); }
+.issue-open-link { display: block; margin-top: 9px; border: 0; background: transparent;
+  color: var(--nord10); padding: 0; font-size: 13px; font-weight: 650; }
+
+@media (max-width: 800px) {
+  .issue-row { grid-template-columns: minmax(0, 1fr) auto; gap: 9px 12px; }
+  .issue-row-main { grid-column: 1 / -1; }
+  .issue-report-count { grid-column: 2; }
+}
+@media (max-width: 600px) {
+  .issue-linked-report { grid-template-columns: minmax(0, 1fr) auto; }
+  .issue-linked-report .report-title { grid-column: 1 / -1; }
+  .issue-link-form { flex-direction: column; }
+}
+
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; color: var(--text-soft); font-size: 14px; }
 .pagination > div { display: flex; align-items: center; gap: 12px; }
 .pagination .secondary { min-height: 34px; padding: 7px 11px; }

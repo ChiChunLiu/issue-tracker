@@ -24,6 +24,7 @@ struct Project {
     id: i64,
     name: String,
     report_count: i64,
+    issue_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -81,6 +82,7 @@ struct ReportSummary {
     app_version: String,
     reported_at: String,
     tags: Vec<String>,
+    issue_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +99,31 @@ struct Report {
     application_log: String,
     reported_at: String,
     tags: Vec<String>,
+    issue_id: Option<i64>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct IssueInput {
+    project_id: i64,
+    title: String,
+    description: String,
+    root_cause: String,
+    fix: String,
+    state: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Issue {
+    id: i64,
+    project_id: i64,
+    title: String,
+    description: String,
+    root_cause: String,
+    fix: String,
+    state: String,
+    report_count: i64,
     created_at: String,
     updated_at: String,
 }
@@ -145,7 +172,7 @@ fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
              PRAGMA user_version = 2;
              COMMIT;",
         )?,
-        2 | 3 | 4 | 5 | 6 => (),
+        2 | 3 | 4 | 5 | 6 | 7 => (),
         _ => return Err(rusqlite::Error::InvalidQuery),
     }
     if version <= 2 {
@@ -196,6 +223,35 @@ fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
                ('anthropic_endpoint', 'https://api.anthropic.com/v1/messages'),
                ('anthropic_model', 'claude-sonnet-4-6');
              PRAGMA user_version = 6;
+             COMMIT;",
+        )?;
+    }
+    if version <= 6 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE issues (
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+               title TEXT NOT NULL,
+               description TEXT NOT NULL DEFAULT '',
+               root_cause TEXT NOT NULL DEFAULT '',
+               fix TEXT NOT NULL DEFAULT '',
+               state TEXT NOT NULL CHECK(state IN ('investigating', 'pr-opened', 'pr-merged', 'released')),
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             CREATE INDEX issues_project_updated ON issues(project_id, updated_at DESC);
+             ALTER TABLE reports ADD COLUMN issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL;
+             CREATE INDEX reports_issue_id ON reports(issue_id);
+             CREATE TRIGGER report_issue_project_insert BEFORE INSERT ON reports
+             WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
+             ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
+             CREATE TRIGGER report_issue_project_update BEFORE UPDATE OF issue_id, project_id ON reports
+             WHEN NEW.issue_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM issues WHERE id = NEW.issue_id AND project_id = NEW.project_id
+             ) BEGIN SELECT RAISE(ABORT, 'Issue and report must belong to the same project'); END;
+             PRAGMA user_version = 7;
              COMMIT;",
         )?;
     }
@@ -276,7 +332,7 @@ fn read_report(connection: &Connection, id: i64) -> rusqlite::Result<Option<Repo
     let report = connection
         .query_row(
             "SELECT id, project_id, title, platform, system_info, app_version, application_log,
-                    reported_at, created_at, updated_at, source, description, note
+                    reported_at, created_at, updated_at, source, description, note, issue_id
              FROM reports WHERE id = ?1",
             [id],
             |row| {
@@ -293,6 +349,7 @@ fn read_report(connection: &Connection, id: i64) -> rusqlite::Result<Option<Repo
                     application_log: row.get(6)?,
                     reported_at: row.get(7)?,
                     tags: Vec::new(),
+                    issue_id: row.get(13)?,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                 })
@@ -615,7 +672,7 @@ fn query_reports(
     let mut query = connection.prepare(
         "SELECT id, project_id, title, platform, system_info, app_version,
                 CASE WHEN ?1 = '' THEN '' ELSE application_log END, reported_at,
-                source, description, note
+                source, description, note, issue_id
          FROM reports ORDER BY reported_at DESC, id DESC",
     )?;
     let rows = query.query_map([&filters.application_log], |row| {
@@ -631,6 +688,7 @@ fn query_reports(
             row.get::<_, String>(8)?,
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
+            row.get::<_, Option<i64>>(11)?,
         ))
     })?;
     let mut reports = Vec::new();
@@ -647,6 +705,7 @@ fn query_reports(
             source,
             description,
             note,
+            issue_id,
         ) = row?;
         let report_tags = tags.get(&id).cloned().unwrap_or_default();
         if filters.project_id != 0 && filters.project_id != project_id
@@ -675,12 +734,141 @@ fn query_reports(
             app_version,
             reported_at,
             tags: report_tags,
+            issue_id,
         });
     }
     if filters.oldest_first {
         reports.reverse();
     }
     Ok(reports)
+}
+
+fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Issue> {
+    Ok(Issue {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        root_cause: row.get(4)?,
+        fix: row.get(5)?,
+        state: row.get(6)?,
+        report_count: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+const ISSUE_SELECT: &str = "SELECT i.id, i.project_id, i.title, i.description, i.root_cause,
+    i.fix, i.state, COUNT(r.id), i.created_at, i.updated_at
+    FROM issues i LEFT JOIN reports r ON r.issue_id = i.id";
+
+fn read_issue(connection: &Connection, id: i64) -> rusqlite::Result<Option<Issue>> {
+    connection
+        .query_row(
+            &format!("{ISSUE_SELECT} WHERE i.id = ?1 GROUP BY i.id"),
+            [id],
+            issue_from_row,
+        )
+        .optional()
+}
+
+fn issues_for_project(connection: &Connection, project_id: i64) -> rusqlite::Result<Vec<Issue>> {
+    let mut query = connection.prepare(&format!(
+        "{ISSUE_SELECT} WHERE i.project_id = ?1 GROUP BY i.id ORDER BY i.updated_at DESC, i.id DESC"
+    ))?;
+    let rows = query.query_map([project_id], issue_from_row)?;
+    rows.collect()
+}
+
+fn validate_issue(input: &IssueInput) -> Result<(), String> {
+    if input.title.trim().is_empty() || input.title.chars().count() > 500 {
+        return Err("Issue title must be 1–500 characters.".to_owned());
+    }
+    if !matches!(
+        input.state.as_str(),
+        "investigating" | "pr-opened" | "pr-merged" | "released"
+    ) {
+        return Err("Select a valid issue state.".to_owned());
+    }
+    if input.description.chars().count() > 100_000
+        || input.root_cause.chars().count() > 100_000
+        || input.fix.chars().count() > 100_000
+    {
+        return Err("Issue text is too long.".to_owned());
+    }
+    Ok(())
+}
+
+fn insert_issue(connection: &Connection, input: IssueInput) -> Result<Issue, String> {
+    validate_issue(&input)?;
+    connection
+        .execute(
+            "INSERT INTO issues (project_id, title, description, root_cause, fix, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                input.project_id,
+                input.title.trim(),
+                input.description,
+                input.root_cause,
+                input.fix,
+                input.state
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    read_issue(connection, connection.last_insert_rowid())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "The new issue could not be loaded.".to_owned())
+}
+
+fn change_issue(connection: &Connection, id: i64, input: IssueInput) -> Result<Issue, String> {
+    validate_issue(&input)?;
+    let changed = connection
+        .execute(
+            "UPDATE issues SET title = ?1, description = ?2, root_cause = ?3, fix = ?4,
+         state = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?6 AND project_id = ?7",
+            params![
+                input.title.trim(),
+                input.description,
+                input.root_cause,
+                input.fix,
+                input.state,
+                id,
+                input.project_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Issue not found in this project.".to_owned());
+    }
+    read_issue(connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Issue not found.".to_owned())
+}
+
+fn set_report_issue(
+    connection: &Connection,
+    report_id: i64,
+    issue_id: Option<i64>,
+) -> Result<Report, String> {
+    let report = read_report(connection, report_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Report not found.".to_owned())?;
+    if let Some(issue_id) = issue_id {
+        let issue = read_issue(connection, issue_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Issue not found.".to_owned())?;
+        if issue.project_id != report.project_id {
+            return Err("Issue and report must belong to the same project.".to_owned());
+        }
+    }
+    connection.execute(
+        "UPDATE reports SET issue_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?2",
+        params![issue_id, report_id],
+    ).map_err(|error| error.to_string())?;
+    read_report(connection, report_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Report not found.".to_owned())
 }
 
 fn read_setting(connection: &Connection, key: &str) -> rusqlite::Result<String> {
@@ -727,7 +915,7 @@ fn project_exists(connection: &Connection, id: i64) -> rusqlite::Result<bool> {
 fn read_project(connection: &Connection, id: i64) -> rusqlite::Result<Option<Project>> {
     connection
         .query_row(
-            "SELECT p.id, p.name, COUNT(r.id) FROM projects p
+            "SELECT p.id, p.name, COUNT(r.id), (SELECT COUNT(*) FROM issues i WHERE i.project_id = p.id) FROM projects p
          LEFT JOIN reports r ON r.project_id = p.id WHERE p.id = ?1 GROUP BY p.id",
             [id],
             |row| {
@@ -735,6 +923,7 @@ fn read_project(connection: &Connection, id: i64) -> rusqlite::Result<Option<Pro
                     id: row.get(0)?,
                     name: row.get(1)?,
                     report_count: row.get(2)?,
+                    issue_count: row.get(3)?,
                 })
             },
         )
@@ -743,7 +932,7 @@ fn read_project(connection: &Connection, id: i64) -> rusqlite::Result<Option<Pro
 
 fn projects(connection: &Connection) -> rusqlite::Result<Vec<Project>> {
     let mut query = connection.prepare(
-        "SELECT p.id, p.name, COUNT(r.id) FROM projects p
+        "SELECT p.id, p.name, COUNT(r.id), (SELECT COUNT(*) FROM issues i WHERE i.project_id = p.id) FROM projects p
          LEFT JOIN reports r ON r.project_id = p.id
          GROUP BY p.id ORDER BY p.created_at, p.id",
     )?;
@@ -752,6 +941,7 @@ fn projects(connection: &Connection) -> rusqlite::Result<Vec<Project>> {
             id: row.get(0)?,
             name: row.get(1)?,
             report_count: row.get(2)?,
+            issue_count: row.get(3)?,
         })
     })?;
     rows.collect()
@@ -801,8 +991,8 @@ fn delete_project_record(connection: &Connection, id: i64) -> Result<(), String>
     let project = read_project(connection, id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Project not found.".to_owned())?;
-    if project.report_count > 0 {
-        return Err("Move or delete its reports before deleting this project.".to_owned());
+    if project.report_count > 0 || project.issue_count > 0 {
+        return Err("Delete the project's reports and issues before deleting it.".to_owned());
     }
     connection
         .execute("DELETE FROM projects WHERE id = ?1", [id])
@@ -861,6 +1051,61 @@ fn list_reports(
 ) -> Result<Vec<ReportSummary>, String> {
     let connection = state.connection.lock().map_err(|error| error.to_string())?;
     query_reports(&connection, &filters).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_issues(project_id: i64, state: State<'_, AppState>) -> Result<Vec<Issue>, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    issues_for_project(&connection, project_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_issue(id: i64, state: State<'_, AppState>) -> Result<Issue, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    read_issue(&connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Issue not found.".to_owned())
+}
+
+#[tauri::command]
+fn create_issue(input: IssueInput, state: State<'_, AppState>) -> Result<Issue, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let issue = insert_issue(&connection, input)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(issue)
+}
+
+#[tauri::command]
+fn update_issue(id: i64, input: IssueInput, state: State<'_, AppState>) -> Result<Issue, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let issue = change_issue(&connection, id, input)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(issue)
+}
+
+#[tauri::command]
+fn delete_issue(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let changed = connection
+        .execute("DELETE FROM issues WHERE id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Issue not found.".to_owned());
+    }
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(())
+}
+
+#[tauri::command]
+fn link_report_issue(
+    report_id: i64,
+    issue_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Report, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let report = set_report_issue(&connection, report_id, issue_id)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(report)
 }
 
 #[tauri::command]
@@ -1085,6 +1330,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_reports,
+            list_issues,
+            get_issue,
+            create_issue,
+            update_issue,
+            delete_issue,
+            link_report_issue,
             list_projects,
             create_project,
             rename_project,
@@ -1266,6 +1517,8 @@ mod tests {
         assert_eq!(report.source, "");
         assert_eq!(report.description, "");
         assert_eq!(report.note, "");
+        assert_eq!(report.issue_id, None);
+        assert!(issues_for_project(&connection, 1).unwrap().is_empty());
         drop(connection);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1277,6 +1530,81 @@ mod tests {
         let mut invalid = input("Report");
         invalid.platform = "Other".to_owned();
         assert!(insert_report(&mut connection, invalid).is_err());
+    }
+
+    #[test]
+    fn issues_group_reports_within_a_project_and_unlink_on_delete() {
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        let second_project = create_project_record(&connection, "Second").unwrap();
+        let issue_input = IssueInput {
+            project_id: 1,
+            title: "Wake failure".to_owned(),
+            description: "Blank after resume".to_owned(),
+            root_cause: "Renderer not restored".to_owned(),
+            fix: "Recreate renderer".to_owned(),
+            state: "investigating".to_owned(),
+        };
+        let issue = insert_issue(&connection, issue_input.clone()).unwrap();
+        assert_eq!(
+            read_project(&connection, 1).unwrap().unwrap().issue_count,
+            1
+        );
+        assert!(delete_project_record(&connection, 1).is_err());
+        let first = insert_report(&mut connection, input("First wake report")).unwrap();
+        let second = insert_report(&mut connection, input("Second wake report")).unwrap();
+        assert_eq!(
+            set_report_issue(&connection, first.id, Some(issue.id))
+                .unwrap()
+                .issue_id,
+            Some(issue.id)
+        );
+        set_report_issue(&connection, second.id, Some(issue.id)).unwrap();
+        assert_eq!(
+            read_issue(&connection, issue.id)
+                .unwrap()
+                .unwrap()
+                .report_count,
+            2
+        );
+
+        let mut other_input = input("Other project report");
+        other_input.project_id = second_project.id;
+        let other = insert_report(&mut connection, other_input).unwrap();
+        assert!(set_report_issue(&connection, other.id, Some(issue.id)).is_err());
+        let mut invalid_move = input("Moved report");
+        invalid_move.project_id = second_project.id;
+        assert!(change_report(&mut connection, first.id, invalid_move).is_err());
+        assert_eq!(
+            read_report(&connection, first.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            1
+        );
+
+        let mut merged = issue_input;
+        merged.state = "pr-merged".to_owned();
+        assert_eq!(
+            change_issue(&connection, issue.id, merged).unwrap().state,
+            "pr-merged"
+        );
+        connection
+            .execute("DELETE FROM issues WHERE id = ?1", [issue.id])
+            .unwrap();
+        assert_eq!(
+            read_report(&connection, first.id)
+                .unwrap()
+                .unwrap()
+                .issue_id,
+            None
+        );
+        assert_eq!(
+            read_report(&connection, second.id)
+                .unwrap()
+                .unwrap()
+                .issue_id,
+            None
+        );
     }
 
     #[test]

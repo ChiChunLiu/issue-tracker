@@ -4,9 +4,9 @@ import { TagEditor } from './TagEditor';
 import { ReportedAtPicker } from './ReportedAtPicker';
 import appIcon from '../src-tauri/icons/128x128.png';
 import { translate, type Language, type TranslationKey } from './i18n';
-import { emptyFilters, type AiReportDraft, type AppSettings, type BackupStatus, type Platform, type Project, type Report, type ReportFilters, type ReportInput, type ReportSource, type ReportSummary, type Theme } from './types';
+import { emptyFilters, type AiReportDraft, type AppSettings, type BackupStatus, type Issue, type IssueInput, type IssueState, type Platform, type Project, type Report, type ReportFilters, type ReportInput, type ReportSource, type ReportSummary, type Theme } from './types';
 
-type View = 'reports' | 'new-choice' | 'ai-import' | 'new' | 'edit' | 'detail' | 'projects' | 'settings';
+type View = 'reports' | 'new-choice' | 'ai-import' | 'new' | 'edit' | 'detail' | 'issues' | 'issue-new' | 'issue-edit' | 'issue-detail' | 'projects' | 'settings';
 type Message = { text: string; error: boolean } | null;
 type FilterDraft = Pick<ReportFilters, 'title' | 'source' | 'description' | 'note' | 'platform' | 'system_info' | 'app_version' | 'application_log' | 'tag'> & { from: string; to: string };
 
@@ -124,12 +124,57 @@ function ReportForm({ initial, draft, projectId, suggestions, language, onCancel
   </div>;
 }
 
+function IssueForm({ initial, projectId, language, onCancel, onSave }: {
+  initial: Issue | null; projectId: number; language: Language;
+  onCancel: () => void; onSave: (input: IssueInput) => Promise<void>;
+}) {
+  const t = (key: TranslationKey) => translate(language, key);
+  const [form, setForm] = useState<IssueInput>(() => initial ? {
+    project_id: initial.project_id, title: initial.title, description: initial.description,
+    root_cause: initial.root_cause, fix: initial.fix, state: initial.state
+  } : { project_id: projectId, title: '', description: '', root_cause: '', fix: '', state: 'investigating' });
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    try { await onSave({ ...form, title: form.title.trim() }); }
+    finally { setSaving(false); }
+  }
+  return <div>
+    <button className="back" type="button" onClick={onCancel}>← {initial ? t('issueDetail') : t('issues')}</button>
+    <div className="page-head"><h1>{initial ? t('editIssue') : t('newIssue')}</h1></div>
+    <form className="form-panel" onSubmit={event => void submit(event)}><div className="fields">
+      <div className="field"><label htmlFor="issue-title">{t('title')}</label>
+        <input id="issue-title" required maxLength={500} value={form.title}
+          onChange={event => setForm({ ...form, title: event.target.value })} /></div>
+      <div className="field"><label htmlFor="issue-state">{t('state')}</label>
+        <select id="issue-state" value={form.state} onChange={event => setForm({ ...form, state: event.target.value as IssueState })}>
+          <option value="investigating">{t('investigating')}</option>
+          <option value="pr-opened">{t('prOpened')}</option>
+          <option value="pr-merged">{t('prMerged')}</option>
+          <option value="released">{t('released')}</option>
+        </select></div>
+      <div className="field"><label htmlFor="issue-description">{t('description')}</label>
+        <textarea id="issue-description" value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} /></div>
+      <div className="field"><label htmlFor="issue-root-cause">{t('rootCause')}</label>
+        <textarea id="issue-root-cause" value={form.root_cause} onChange={event => setForm({ ...form, root_cause: event.target.value })} /></div>
+      <div className="field"><label htmlFor="issue-fix">{t('fix')}</label>
+        <textarea id="issue-fix" value={form.fix} onChange={event => setForm({ ...form, fix: event.target.value })} /></div>
+    </div><div className="actions"><button className="secondary" type="button" onClick={onCancel}>{t('cancel')}</button>
+      <button className="primary" type="submit" disabled={saving}>{initial ? t('saveChanges') : t('saveIssue')}</button></div></form>
+  </div>;
+}
+
 export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('sidebarCollapsed') === 'true');
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setView] = useState<View>('reports');
   const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
+  const [projectReports, setProjectReports] = useState<ReportSummary[]>([]);
+  const [linkReportId, setLinkReportId] = useState('');
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Report | null>(null);
   const [importText, setImportText] = useState('');
@@ -203,6 +248,20 @@ export function App() {
       .catch(error => { if (alive) showError(error); });
     return () => { alive = false; };
   }, [filters]);
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    api.listIssues(projectId).then(items => { if (alive) setIssues(items); })
+      .catch(error => { if (alive) showError(error); });
+    return () => { alive = false; };
+  }, [projectId]);
+  useEffect(() => {
+    if (view !== 'issue-detail' || !selectedIssue) return;
+    let alive = true;
+    api.listReports(emptyFilters(selectedIssue.project_id)).then(items => { if (alive) setProjectReports(items); })
+      .catch(error => { if (alive) showError(error); });
+    return () => { alive = false; };
+  }, [view, selectedIssue?.id, selectedIssue?.project_id]);
   useEffect(() => { setPage(1); }, [filters]);
 
   const pageCount = Math.max(1, Math.ceil(reports.length / 10));
@@ -214,12 +273,13 @@ export function App() {
   }
   function showMessage(text: string) { setMessage({ text, error: false }); }
   async function refresh(project = projectId, activeFilters = filters) {
-    const [nextProjects, nextReports, nextTags, status] = await Promise.all([
+    const [nextProjects, nextReports, nextIssues, nextTags, status] = await Promise.all([
       api.listProjects(), api.listReports({ ...activeFilters, project_id: project }),
-      api.listTags(project), api.getBackupStatus()
+      api.listIssues(project), api.listTags(project), api.getBackupStatus()
     ]);
     setProjects(nextProjects);
     setReports(nextReports);
+    setIssues(nextIssues);
     setAvailableTags(nextTags);
     setBackupStatus(status);
   }
@@ -232,6 +292,8 @@ export function App() {
       setFilterDraft(blankFilterDraft());
       setView('reports');
       setSelected(null);
+      setSelectedIssue(null);
+      setIssues([]);
     } catch (error) { showError(error); }
   }
   async function saveReport(input: ReportInput) {
@@ -259,6 +321,41 @@ export function App() {
       await refresh();
       setView('reports');
       showMessage(t('reportDeleted'));
+    } catch (error) { showError(error); }
+  }
+  async function openIssue(id: number) {
+    try { setSelectedIssue(await api.getIssue(id)); setView('issue-detail'); }
+    catch (error) { showError(error); }
+  }
+  async function saveIssue(input: IssueInput) {
+    try {
+      const issue = selectedIssue && view === 'issue-edit'
+        ? await api.updateIssue(selectedIssue.id, input) : await api.createIssue(input);
+      setSelectedIssue(issue);
+      await refresh();
+      setView('issue-detail');
+      showMessage(t('issueSaved'));
+    } catch (error) { showError(error); }
+  }
+  async function deleteIssue() {
+    if (!selectedIssue || !window.confirm(t('deleteIssueConfirm'))) return;
+    try {
+      await api.deleteIssue(selectedIssue.id);
+      setSelectedIssue(null);
+      await refresh();
+      setView('issues');
+      showMessage(t('issueDeleted'));
+    } catch (error) { showError(error); }
+  }
+  async function changeReportIssue(reportId: number, issueId: number | null) {
+    try {
+      const updated = await api.linkReportIssue(reportId, issueId);
+      if (selected?.id === reportId) setSelected(updated);
+      if (selectedIssue) setSelectedIssue(await api.getIssue(selectedIssue.id));
+      await refresh();
+      if (view === 'issue-detail') setProjectReports(await api.listReports(emptyFilters(projectId)));
+      setLinkReportId('');
+      showMessage(t('reportLinkSaved'));
     } catch (error) { showError(error); }
   }
   async function addSamples() {
@@ -387,6 +484,9 @@ export function App() {
         <button className={'nav-button ' + (['reports', 'new-choice', 'ai-import', 'new', 'edit', 'detail'].includes(view) ? 'active' : '')}
           aria-label={t('reports')} title={sidebarCollapsed ? t('reports') : undefined}
           onClick={() => setView('reports')}>▤ <span>{t('reports')}</span></button>
+        <button className={'nav-button ' + (['issues', 'issue-new', 'issue-edit', 'issue-detail'].includes(view) ? 'active' : '')}
+          aria-label={t('issues')} title={sidebarCollapsed ? t('issues') : undefined}
+          onClick={() => setView('issues')}>◇ <span>{t('issues')}</span></button>
       </nav>
       <button className={'settings-button nav-button ' + (view === 'settings' ? 'active' : '')}
         aria-label={t('settings')} title={sidebarCollapsed ? t('settings') : undefined}
@@ -461,6 +561,47 @@ export function App() {
             <span>{currentPage} / {pageCount}</span>
             <button className="secondary" type="button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t('next')}</button></div></div>}
       </div>}
+      {view === 'issues' && <div>
+        <div className="page-head"><h1>{t('issues')}</h1><button className="primary" type="button"
+          onClick={() => { setSelectedIssue(null); setView('issue-new'); }}>+ {t('newIssue')}</button></div>
+        {issues.length ? <div className="issue-list">{issues.map(issue => <button className="issue-row" type="button" key={issue.id}
+          onClick={() => void openIssue(issue.id)}>
+          <span className="issue-row-main"><strong>{issue.title}</strong><span className="issue-row-description">{issue.description || '—'}</span></span>
+          <span className={'state-badge state-' + issue.state}>{t(issue.state === 'pr-opened' ? 'prOpened' : issue.state === 'pr-merged' ? 'prMerged' : issue.state)}</span>
+          <span className="issue-report-count">{issue.report_count} {t('linkedReports')}</span>
+        </button>)}</div> : <div className="panel empty"><h2>{t('noIssues')}</h2></div>}
+      </div>}
+      {(view === 'issue-new' || view === 'issue-edit') && <IssueForm key={view + ':' + (selectedIssue?.id ?? projectId)}
+        initial={view === 'issue-edit' ? selectedIssue : null} projectId={projectId} language={language}
+        onCancel={() => setView(view === 'issue-edit' ? 'issue-detail' : 'issues')} onSave={saveIssue} />}
+      {view === 'issue-detail' && selectedIssue && <div>
+        <button className="back" type="button" onClick={() => setView('issues')}>← {t('issues')}</button>
+        <div className="page-head"><h1>{selectedIssue.title}</h1><div className="detail-actions">
+          <button className="secondary" type="button" onClick={() => setView('issue-edit')}>{t('edit')}</button>
+          <button className="danger" type="button" onClick={() => void deleteIssue()}>{t('delete')}</button>
+        </div></div>
+        <div className="detail-panel issue-detail-panel">
+          <div className="detail-block"><span className="detail-label">{t('state')}</span>
+            <span className={'state-badge state-' + selectedIssue.state}>{t(selectedIssue.state === 'pr-opened' ? 'prOpened' : selectedIssue.state === 'pr-merged' ? 'prMerged' : selectedIssue.state)}</span></div>
+          {([[t('description'), selectedIssue.description], [t('rootCause'), selectedIssue.root_cause], [t('fix'), selectedIssue.fix]] as const)
+            .map(([label, value]) => <div className="detail-block" key={label}><span className="detail-label">{label}</span>
+              <p className="detail-value">{value || '—'}</p></div>)}
+          <div className="detail-block"><span className="detail-label">{t('linkedReports')} ({selectedIssue.report_count})</span>
+            <div className="issue-linked-reports">{projectReports.filter(report => report.issue_id === selectedIssue.id).map(report =>
+              <div className="issue-linked-report" key={report.id}><button className="report-title" type="button"
+                onClick={() => void api.getReport(report.id).then(item => { setSelected(item); setView('detail'); }).catch(showError)}>{report.title}</button>
+                <span>{formatDate(report.reported_at, language)}</span>
+                <button className="secondary" type="button" onClick={() => void changeReportIssue(report.id, null)}>{t('unlink')}</button></div>)}
+              {selectedIssue.report_count === 0 && <span className="no-tags">{t('noLinkedReports')}</span>}</div>
+            <div className="issue-link-form"><select aria-label={t('linkReport')} value={linkReportId} onChange={event => setLinkReportId(event.target.value)}>
+              <option value="">{t('selectReport')}</option>
+              {projectReports.filter(report => report.issue_id === null).map(report =>
+                <option key={report.id} value={report.id}>{report.title}</option>)}
+            </select><button className="secondary" type="button" disabled={!linkReportId}
+              onClick={() => void changeReportIssue(Number(linkReportId), selectedIssue.id)}>{t('linkReport')}</button></div>
+          </div>
+        </div>
+      </div>}
       {view === 'new-choice' && <div>
         <button className="back" onClick={() => setView('reports')}>← {t('reports')}</button>
         <div className="page-head"><h1>{t('newReport')}</h1></div>
@@ -500,6 +641,13 @@ export function App() {
           <div className="detail-actions"><button className="secondary" onClick={() => setView('edit')}>{t('edit')}</button>
             <button className="danger" onClick={() => void deleteReport()}>{t('delete')}</button></div></div>
         <div className="detail-panel">
+          <div className="detail-block"><label className="detail-label" htmlFor="report-issue">{t('issue')}</label>
+            <select className="issue-select" id="report-issue" value={selected.issue_id ?? ''}
+              onChange={event => void changeReportIssue(selected.id, event.target.value ? Number(event.target.value) : null)}>
+              <option value="">{t('unlinked')}</option>
+              {issues.map(issue => <option key={issue.id} value={issue.id}>{issue.title}</option>)}
+            </select>
+            {selected.issue_id && <button className="issue-open-link" type="button" onClick={() => void openIssue(selected.issue_id!)}>{t('viewIssue')} →</button>}</div>
           {([
             [t('title'), selected.title], [t('projects'), projects.find(project => project.id === selected.project_id)?.name ?? '—'],
             [t('platform'), selected.platform || '—'], [t('source'), selected.source || '—'],
@@ -597,12 +745,12 @@ function ProjectsView({ projects, selectedId, language, onCreate, onRename, onDe
       }}><input value={renameValue} autoFocus maxLength={100} onChange={event => setRenameValue(event.target.value)} />
         <button className="primary" type="submit">{t('saveChanges')}</button>
         <button className="secondary" type="button" onClick={() => setRenaming(null)}>{t('cancel')}</button></form>
-        : <><div className="project-info"><strong>{project.name}</strong><span>{project.report_count} {t('projectReports')}</span></div>
+        : <><div className="project-info"><strong>{project.name}</strong><span>{project.report_count} {t('projectReports')} · {project.issue_count} {t('issues')}</span></div>
           <div className="project-actions">
             {project.id !== selectedId && <button className="secondary" onClick={() => void onSelect(project.id)}>{t('selectProject')}</button>}
             <button className="secondary" onClick={() => { setRenaming(project.id); setRenameValue(project.name); }}>{t('rename')}</button>
-            <button className="danger" disabled={project.report_count > 0 || projects.length < 2}
-              title={project.report_count > 0 ? t('cannotDeleteProject') : ''} onClick={() => void onDelete(project.id)}>{t('delete')}</button>
+            <button className="danger" disabled={project.report_count > 0 || project.issue_count > 0 || projects.length < 2}
+              title={project.report_count > 0 || project.issue_count > 0 ? t('cannotDeleteProject') : ''} onClick={() => void onDelete(project.id)}>{t('delete')}</button>
           </div></>}
     </div>)}</div>
   </div>;

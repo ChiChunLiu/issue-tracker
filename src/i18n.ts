@@ -1,7 +1,14 @@
 export type Language = 'en' | 'zh-TW';
 
 const en = {
-  appName: 'Issue Tracker', reports: 'Reports', projects: 'Projects', settings: 'Settings',
+  appName: 'Issue Tracker', reports: 'Reports', issues: 'Issues', issue: 'Issue', projects: 'Projects', settings: 'Settings',
+  newIssue: 'New issue', editIssue: 'Edit issue', issueDetail: 'Issue detail', saveIssue: 'Save issue',
+  noIssues: 'No issues yet', issueSaved: 'Issue saved.', issueDeleted: 'Issue deleted.',
+  deleteIssueConfirm: 'Delete this issue? Its reports will remain and become unlinked.',
+  state: 'State', investigating: 'Investigating', prOpened: 'PR opened', prMerged: 'PR merged', released: 'Released',
+  rootCause: 'Root cause', fix: 'Fix', linkedReports: 'linked reports', noLinkedReports: 'No linked reports yet.',
+  linkReport: 'Link report', selectReport: 'Select an unlinked report', unlink: 'Unlink', unlinked: 'Unlinked',
+  viewIssue: 'View issue', reportLinkSaved: 'Report link saved.',
   newReport: 'New report', editReport: 'Edit report', reportDetail: 'Report detail',
   form: 'Form', aiImport: 'AI import', formChoice: 'Enter a report yourself.',
   aiImportChoice: 'Paste a message to create an editable draft.',
@@ -36,7 +43,7 @@ const en = {
   manageProjects: 'Manage projects', newProject: 'New project', projectName: 'Project name',
   rename: 'Rename', projectReports: 'reports', noProjects: 'No projects',
   projectCreated: 'Project created.', projectRenamed: 'Project renamed.', projectDeleted: 'Project deleted.',
-  cannotDeleteProject: 'Move or delete its reports before deleting this project.',
+  cannotDeleteProject: 'Delete its reports and issues before deleting this project.',
   deleteProjectConfirm: 'Delete this empty project?', deleteReportConfirm: 'Delete this report permanently?',
   reportSaved: 'Report saved.', reportDeleted: 'Report deleted.', samplesAdded: '10 sample reports added.',
   backupSaved: 'Backup saved.', backupFolder: 'Backup folder', chooseFolder: 'Choose folder',
@@ -60,7 +67,14 @@ const en = {
 export type TranslationKey = keyof typeof en;
 
 const zhTW: Record<TranslationKey, string> = {
-  appName: '問題追蹤器', reports: '報告', projects: '專案', settings: '設定',
+  appName: '問題追蹤器', reports: '報告', issues: '問題', issue: '問題', projects: '專案', settings: '設定',
+  newIssue: '新增問題', editIssue: '編輯問題', issueDetail: '問題詳情', saveIssue: '儲存問題',
+  noIssues: '尚無問題', issueSaved: '已儲存問題。', issueDeleted: '已刪除問題。',
+  deleteIssueConfirm: '刪除此問題？相關報告會保留並解除連結。',
+  state: '狀態', investigating: '調查中', prOpened: 'PR 已建立', prMerged: 'PR 已合併', released: '已發布',
+  rootCause: '根本原因', fix: '修正方式', linkedReports: '筆相關報告', noLinkedReports: '尚無相關報告。',
+  linkReport: '連結報告', selectReport: '選擇未連結的報告', unlink: '解除連結', unlinked: '未連結',
+  viewIssue: '檢視問題', reportLinkSaved: '已儲存報告連結。',
   newReport: '新增報告', editReport: '編輯報告', reportDetail: '報告詳情',
   form: '表單', aiImport: 'AI 匯入', formChoice: '自行填寫報告。',
   aiImportChoice: '貼上訊息，產生可編輯的草稿。',
@@ -95,7 +109,7 @@ const zhTW: Record<TranslationKey, string> = {
   manageProjects: '管理專案', newProject: '新增專案', projectName: '專案名稱',
   rename: '重新命名', projectReports: '筆報告', noProjects: '尚無專案',
   projectCreated: '已建立專案。', projectRenamed: '已重新命名專案。', projectDeleted: '已刪除專案。',
-  cannotDeleteProject: '請先移動或刪除此專案的報告。',
+  cannotDeleteProject: '請先刪除此專案的報告與問題。',
   deleteProjectConfirm: '刪除此空白專案？', deleteReportConfirm: '永久刪除此報告？',
   reportSaved: '已儲存報告。', reportDeleted: '已刪除報告。', samplesAdded: '已新增 10 筆範例報告。',
   backupSaved: '已儲存備份。', backupFolder: '備份資料夾', chooseFolder: '選擇資料夾',
