@@ -8,6 +8,8 @@ Issue Tracker is a desktop app for turning scattered bug reports into a clear li
 
 On macOS, open the DMG, drag **Issue Tracker.app** into Applications, and launch it from there. If you built the app yourself, see [Build from source](#build-from-source).
 
+Closing the window hides it and, on macOS, removes the app from the Dock while it keeps running in the tray. Use **Show app** in the tray menu to restore the window, or **Quit** to exit fully.
+
 1. Choose a project in the sidebar. The app starts with **Default project**; use the **+** beside the project selector to create or manage projects. Reports and issues stay within their project.
 2. Open **Reports** and select **New report**. Choose **Form** to enter a report yourself, or **AI import** to turn pasted text into an editable draft.
 3. Open **Issues** and select **New issue** when you identify a bug. Add its description, root cause, fix, and state. You can start with **Investigating** and move through **PR opened**, **PR merged**, and **Released**.
@@ -17,7 +19,7 @@ On macOS, open the DMG, drag **Issue Tracker.app** into Applications, and launch
 
 A report can contain a title, source, description, note, platform, reported time, system information, app version, application log, and multiple tags. Sources are **Slack**, **Reddit**, **Mail**, and **Zendesk**. Tags are free-form labels; existing tags appear as suggestions as you type.
 
-The Reports page shows ten reports per page. Click **Reported time** to reverse the time order. Open **Filter reports** to narrow by source, platform, tag, time range, or text in the report fields. Text filters tolerate small typos; they do not understand synonyms or the meaning of a sentence. The **Add 10 sample reports** button is for trying the interface and saves real sample records in the active project.
+The Reports page shows ten reports per page. Click **Reported time** to reverse the time order. Open **Filter reports** to narrow by source, platform, tag, time range, or text in the report fields. Text filters tolerate small typos; they do not understand synonyms or the meaning of a sentence. Development builds include an **Add 10 sample reports** button for trying the interface; it saves real sample records in the active project.
 
 To use **AI import**, paste an email, ticket, or conversation and select **Generate draft**. Review and edit every field before saving. The pasted text is sent to the AI endpoint you configure in **Settings** when you generate the draft. Ordinary report entry and editing do not call an AI provider.
 

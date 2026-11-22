@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+};
 use tauri::{Manager, State};
 use uuid::Uuid;
 
@@ -12,6 +16,16 @@ mod mcp;
 
 pub fn run_mcp() -> Result<(), String> {
     mcp::run()
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1258,6 +1272,9 @@ fn list_tags(project_id: i64, state: State<'_, AppState>) -> Result<Vec<String>,
 
 #[tauri::command]
 fn seed_sample_reports(project_id: i64, state: State<'_, AppState>) -> Result<usize, String> {
+    if !cfg!(debug_assertions) {
+        return Err("Sample reports are only available in development builds.".to_owned());
+    }
     let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
     let count =
         insert_sample_reports(&mut connection, project_id).map_err(|error| error.to_string())?;
@@ -1327,14 +1344,21 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        show_main_window(app);
     }));
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    #[cfg(target_os = "macos")]
+                    let _ = window.app_handle().set_dock_visibility(false);
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             if let Err(error) = install_mcp_launcher() {
@@ -1349,6 +1373,29 @@ pub fn run() {
                 database_path,
                 backup_status: Mutex::new(BackupStatus::default()),
             });
+            let show_app = MenuItem::with_id(app, "show-app", "Show app", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_app, &quit])?;
+            let mut tray = TrayIconBuilder::new().tooltip("Issue Tracker");
+            #[cfg(target_os = "macos")]
+            {
+                tray = tray
+                    .icon(tauri::image::Image::from_bytes(include_bytes!(
+                        "../icons/tray.png"
+                    ))?)
+                    .icon_as_template(true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show-app" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

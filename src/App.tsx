@@ -504,7 +504,7 @@ export function App() {
     <div className="content"><main className="page">
       {view === 'reports' && <div>
         <div className="page-head"><h1>{t('reports')}</h1><div className="page-actions">
-          <button className="secondary sample-button" onClick={() => void addSamples()}>{t('addSamples')}</button>
+          {import.meta.env.DEV && <button className="secondary sample-button" onClick={() => void addSamples()}>{t('addSamples')}</button>}
           <button className="primary" onClick={() => { setSelected(null); setImportedDraft(null); setImportText(''); setView('new-choice'); }}>{'+ ' + t('newReport')}</button>
         </div></div>
         <details className="filter-panel" open={filterOpen} onToggle={event => setFilterOpen(event.currentTarget.open)}>

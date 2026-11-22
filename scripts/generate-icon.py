@@ -9,6 +9,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 ICONS = ROOT / "src-tauri" / "icons"
 SIZE = 1024
+TRAY_SIZE = 64
 BLUE = (0x81, 0xA1, 0xC1)
 INK = (0x2E, 0x34, 0x40)
 
@@ -49,8 +50,30 @@ def make_master() -> Path:
     return path
 
 
+def make_tray() -> Path:
+    def tray_pixel(x: int, y: int) -> bytes:
+        coverage = 0
+        for dy in (0.25, 0.75):
+            for dx in (0.25, 0.75):
+                sx = (x + dx) * SIZE / TRAY_SIZE
+                sy = (y + dy) * SIZE / TRAY_SIZE
+                diamond = abs(sx - SIZE / 2) + abs(sy - SIZE / 2)
+                coverage += diamond <= 127 or 239 <= diamond <= 317
+        return bytes((0, 0, 0, round(coverage * 255 / 4)))
+
+    rows = (b"\0" + b"".join(tray_pixel(x, y) for x in range(TRAY_SIZE)) for y in range(TRAY_SIZE))
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", TRAY_SIZE, TRAY_SIZE, 8, 6, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+    png += chunk(b"IEND", b"")
+    path = ICONS / "tray.png"
+    path.write_bytes(png)
+    return path
+
+
 def main() -> None:
     master = make_master()
+    make_tray()
     subprocess.run(
         ["npm", "run", "tauri", "icon", str(master)],
         check=True,
