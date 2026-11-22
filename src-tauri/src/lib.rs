@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
+mod ai_import;
+
 struct AppState {
     connection: Mutex<Connection>,
     database_path: PathBuf,
@@ -30,6 +32,11 @@ struct AppSettings {
     language: String,
     backup_folder: String,
     selected_project_id: i64,
+    ai_provider: String,
+    ai_endpoint: String,
+    ai_model: String,
+    anthropic_endpoint: String,
+    anthropic_model: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,7 +145,7 @@ fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
              PRAGMA user_version = 2;
              COMMIT;",
         )?,
-        2 | 3 | 4 => (),
+        2 | 3 | 4 | 5 | 6 => (),
         _ => return Err(rusqlite::Error::InvalidQuery),
     }
     if version <= 2 {
@@ -168,6 +175,27 @@ fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
              ALTER TABLE reports ADD COLUMN description TEXT NOT NULL DEFAULT '';
              ALTER TABLE reports ADD COLUMN note TEXT NOT NULL DEFAULT '';
              PRAGMA user_version = 4;
+             COMMIT;",
+        )?;
+    }
+    if version <= 4 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO app_settings (key, value) VALUES
+               ('ai_endpoint', 'https://api.together.ai/v1/chat/completions'),
+               ('ai_model', 'zai-org/GLM-5.3');
+             PRAGMA user_version = 5;
+             COMMIT;",
+        )?;
+    }
+    if version <= 5 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO app_settings (key, value) VALUES
+               ('ai_provider', 'openai-compatible'),
+               ('anthropic_endpoint', 'https://api.anthropic.com/v1/messages'),
+               ('anthropic_model', 'claude-sonnet-4-6');
+             PRAGMA user_version = 6;
              COMMIT;",
         )?;
     }
@@ -680,6 +708,11 @@ fn read_settings(connection: &Connection) -> rusqlite::Result<AppSettings> {
         selected_project_id: read_setting(connection, "selected_project_id")?
             .parse()
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        ai_provider: read_setting(connection, "ai_provider")?,
+        ai_endpoint: read_setting(connection, "ai_endpoint")?,
+        ai_model: read_setting(connection, "ai_model")?,
+        anthropic_endpoint: read_setting(connection, "anthropic_endpoint")?,
+        anthropic_model: read_setting(connection, "anthropic_model")?,
     })
 }
 
@@ -891,6 +924,7 @@ fn update_settings(
     if !settings.backup_folder.is_empty() && !PathBuf::from(&settings.backup_folder).is_dir() {
         return Err("The backup folder is unavailable.".to_owned());
     }
+    ai_import::validate_ai_config(&settings)?;
     let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
     if !project_exists(&connection, settings.selected_project_id)
         .map_err(|error| error.to_string())?
@@ -905,6 +939,24 @@ fn update_settings(
         .map_err(|error| error.to_string())?;
     write_setting(&transaction, "backup_folder", &settings.backup_folder)
         .map_err(|error| error.to_string())?;
+    write_setting(&transaction, "ai_endpoint", settings.ai_endpoint.trim())
+        .map_err(|error| error.to_string())?;
+    write_setting(&transaction, "ai_model", settings.ai_model.trim())
+        .map_err(|error| error.to_string())?;
+    write_setting(&transaction, "ai_provider", &settings.ai_provider)
+        .map_err(|error| error.to_string())?;
+    write_setting(
+        &transaction,
+        "anthropic_endpoint",
+        settings.anthropic_endpoint.trim(),
+    )
+    .map_err(|error| error.to_string())?;
+    write_setting(
+        &transaction,
+        "anthropic_model",
+        settings.anthropic_model.trim(),
+    )
+    .map_err(|error| error.to_string())?;
     write_setting(
         &transaction,
         "selected_project_id",
@@ -1048,7 +1100,11 @@ pub fn run() {
             create_report,
             update_report,
             delete_report,
-            backup_database
+            backup_database,
+            ai_import::has_ai_token,
+            ai_import::save_ai_token,
+            ai_import::delete_ai_token,
+            ai_import::generate_ai_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running issue tracker");
@@ -1077,6 +1133,18 @@ mod tests {
     #[test]
     fn reports_round_trip_and_filter() {
         let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        let settings = read_settings(&connection).unwrap();
+        assert_eq!(
+            settings.ai_endpoint,
+            "https://api.together.ai/v1/chat/completions"
+        );
+        assert_eq!(settings.ai_model, "zai-org/GLM-5.3");
+        assert_eq!(settings.ai_provider, "openai-compatible");
+        assert_eq!(
+            settings.anthropic_endpoint,
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(settings.anthropic_model, "claude-sonnet-4-6");
         let created = insert_report(&mut connection, input("Freeze on display")).unwrap();
         assert_eq!(created.tags, vec!["Display", "freeze"]);
         assert_eq!(created.platform, "macOS");

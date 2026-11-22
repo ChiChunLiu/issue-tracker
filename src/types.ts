@@ -31,6 +31,7 @@ export interface Report extends ReportSummary {
 }
 
 export type ReportInput = Pick<Report, 'project_id' | 'title' | 'source' | 'description' | 'note' | 'platform' | 'system_info' | 'app_version' | 'application_log' | 'reported_at' | 'tags'>;
+export type AiReportDraft = Omit<ReportInput, 'project_id'>;
 
 export interface ReportFilters {
   project_id: number;
@@ -53,6 +54,11 @@ export interface AppSettings {
   language: Language;
   backup_folder: string;
   selected_project_id: number;
+  ai_provider: 'openai-compatible' | 'anthropic';
+  ai_endpoint: string;
+  ai_model: string;
+  anthropic_endpoint: string;
+  anthropic_model: string;
 }
 
 export interface BackupStatus {

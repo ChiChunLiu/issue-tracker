@@ -4,9 +4,9 @@ import { TagEditor } from './TagEditor';
 import { ReportedAtPicker } from './ReportedAtPicker';
 import appIcon from '../src-tauri/icons/128x128.png';
 import { translate, type Language, type TranslationKey } from './i18n';
-import { emptyFilters, type AppSettings, type BackupStatus, type Platform, type Project, type Report, type ReportFilters, type ReportInput, type ReportSource, type ReportSummary, type Theme } from './types';
+import { emptyFilters, type AiReportDraft, type AppSettings, type BackupStatus, type Platform, type Project, type Report, type ReportFilters, type ReportInput, type ReportSource, type ReportSummary, type Theme } from './types';
 
-type View = 'reports' | 'new' | 'edit' | 'detail' | 'projects' | 'settings';
+type View = 'reports' | 'new-choice' | 'ai-import' | 'new' | 'edit' | 'detail' | 'projects' | 'settings';
 type Message = { text: string; error: boolean } | null;
 type FilterDraft = Pick<ReportFilters, 'title' | 'source' | 'description' | 'note' | 'platform' | 'system_info' | 'app_version' | 'application_log' | 'tag'> & { from: string; to: string };
 
@@ -41,6 +41,7 @@ function platformOptions(t: (key: TranslationKey) => string) {
 
 interface ReportFormProps {
   initial: Report | null;
+  draft: AiReportDraft | null;
   projectId: number;
   suggestions: string[];
   language: Language;
@@ -48,13 +49,13 @@ interface ReportFormProps {
   onSave: (input: ReportInput) => Promise<void>;
   onError: (text: string) => void;
 }
-function ReportForm({ initial, projectId, suggestions, language, onCancel, onSave, onError }: ReportFormProps) {
+function ReportForm({ initial, draft, projectId, suggestions, language, onCancel, onSave, onError }: ReportFormProps) {
   const t = (key: TranslationKey) => translate(language, key);
   const [form, setForm] = useState<ReportInput>(() => initial ? {
     project_id: projectId, title: initial.title, source: initial.source, description: initial.description, note: initial.note, platform: initial.platform,
     system_info: initial.system_info, app_version: initial.app_version,
     application_log: initial.application_log, reported_at: initial.reported_at, tags: [...initial.tags]
-  } : {
+  } : draft ? { ...draft, project_id: projectId } : {
     project_id: projectId, title: '', source: '', description: '', note: '', platform: '' as Platform, system_info: '',
     app_version: '', application_log: '', reported_at: new Date().toISOString(), tags: []
   });
@@ -79,8 +80,9 @@ function ReportForm({ initial, projectId, suggestions, language, onCancel, onSav
   }
 
   return <div>
-    <button className="back" type="button" onClick={onCancel}>← {initial ? t('reportDetail') : t('reports')}</button>
+    <button className="back" type="button" onClick={onCancel}>← {initial ? t('reportDetail') : draft ? t('aiImport') : t('newReport')}</button>
     <div className="page-head"><h1>{initial ? t('editReport') : t('newReport')}</h1></div>
+    {draft && <p className="import-review">{t('reviewDraft')}</p>}
     <form className="form-panel" onSubmit={submit}><div className="fields">
       <div className="field"><label htmlFor="report-title">{t('title')}</label>
         <input id="report-title" required maxLength={500} placeholder={t('titlePlaceholder')} value={form.title}
@@ -130,6 +132,17 @@ export function App() {
   const [reports, setReports] = useState<ReportSummary[]>([]);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Report | null>(null);
+  const [importText, setImportText] = useState('');
+  const [importedDraft, setImportedDraft] = useState<AiReportDraft | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [hasAiToken, setHasAiToken] = useState<boolean | null>(null);
+  const [tokenInput, setTokenInput] = useState('');
+  const [savingToken, setSavingToken] = useState(false);
+  const [aiProviderInput, setAiProviderInput] = useState<AppSettings['ai_provider']>('openai-compatible');
+  const [aiEndpointInput, setAiEndpointInput] = useState('');
+  const [aiModelInput, setAiModelInput] = useState('');
+  const [savingAiConfig, setSavingAiConfig] = useState(false);
+  const [settingsReturnView, setSettingsReturnView] = useState<View | null>(null);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [filters, setFilters] = useState<ReportFilters>(emptyFilters(0));
   const [filterDraft, setFilterDraft] = useState<FilterDraft>(blankFilterDraft());
@@ -141,6 +154,8 @@ export function App() {
   const language = settings?.language ?? 'en';
   const t = (key: TranslationKey) => translate(language, key);
   const projectId = settings?.selected_project_id ?? 0;
+  const aiConfigPending = settings !== null && (aiProviderInput !== settings.ai_provider ||
+    aiEndpointInput.trim() !== (settings.ai_provider === 'anthropic' ? settings.anthropic_endpoint : settings.ai_endpoint));
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings?.theme ?? 'light';
@@ -166,6 +181,20 @@ export function App() {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
+  useEffect(() => {
+    if (!settings) return;
+    setAiProviderInput(settings.ai_provider);
+    setAiEndpointInput(settings.ai_provider === 'anthropic' ? settings.anthropic_endpoint : settings.ai_endpoint);
+    setAiModelInput(settings.ai_provider === 'anthropic' ? settings.anthropic_model : settings.ai_model);
+  }, [settings?.ai_provider, settings?.ai_endpoint, settings?.ai_model, settings?.anthropic_endpoint, settings?.anthropic_model]);
+  useEffect(() => {
+    if (!settings) return;
+    let alive = true;
+    setHasAiToken(null);
+    api.hasAiToken().then(value => { if (alive) setHasAiToken(value); })
+      .catch(error => { if (alive) { setHasAiToken(false); showError(error); } });
+    return () => { alive = false; };
+  }, [settings?.ai_provider, settings?.ai_endpoint, settings?.anthropic_endpoint]);
   useEffect(() => {
     if (!filters.project_id) return;
     let alive = true;
@@ -216,6 +245,8 @@ export function App() {
         setFilterDraft(blankFilterDraft());
       }
       await refresh(input.project_id, input.project_id === projectId ? filters : emptyFilters(input.project_id));
+      setImportText('');
+      setImportedDraft(null);
       setView('detail');
       showMessage(t('reportSaved'));
     } catch (error) { showError(error); throw error; }
@@ -262,6 +293,59 @@ export function App() {
     try { if (await api.exportBackup()) showMessage(t('backupSaved')); }
     catch (error) { showError(error); }
   }
+  async function generateDraft(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setImporting(true);
+    try {
+      const draft = await api.generateAiReport(importText);
+      setImportedDraft(draft);
+      setView('new');
+    } catch (error) { showError(error); }
+    finally { setImporting(false); }
+  }
+  async function saveAiConfig(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settings) return;
+    setSavingAiConfig(true);
+    try {
+      const saved = await api.updateSettings({
+        ...settings,
+        ai_provider: aiProviderInput,
+        ...(aiProviderInput === 'anthropic'
+          ? { anthropic_endpoint: aiEndpointInput.trim(), anthropic_model: aiModelInput.trim() }
+          : { ai_endpoint: aiEndpointInput.trim(), ai_model: aiModelInput.trim() })
+      });
+      setSettings(saved);
+      setBackupStatus(await api.getBackupStatus());
+      showMessage(t('aiConfigSaved'));
+    } catch (error) { showError(error); }
+    finally { setSavingAiConfig(false); }
+  }
+  function chooseAiProvider(provider: AppSettings['ai_provider']) {
+    if (!settings) return;
+    setAiProviderInput(provider);
+    setAiEndpointInput(provider === 'anthropic' ? settings.anthropic_endpoint : settings.ai_endpoint);
+    setAiModelInput(provider === 'anthropic' ? settings.anthropic_model : settings.ai_model);
+  }
+  async function saveAiToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSavingToken(true);
+    try {
+      await api.saveAiToken(tokenInput);
+      setTokenInput('');
+      setHasAiToken(true);
+      showMessage(t('tokenSaved'));
+    } catch (error) { showError(error); }
+    finally { setSavingToken(false); }
+  }
+  async function removeAiToken() {
+    try {
+      await api.deleteAiToken();
+      setTokenInput('');
+      setHasAiToken(false);
+      showMessage(t('tokenRemoved'));
+    } catch (error) { showError(error); }
+  }
   async function createProject(name: string) {
     try {
       const project = await api.createProject(name);
@@ -300,19 +384,19 @@ export function App() {
         </select><button className="project-add" type="button" title={t('manageProjects')} aria-label={t('newProject')}
           onClick={() => setView('projects')}>+</button></div></div>
       <nav className="main-nav" aria-label={t('appName')}>
-        <button className={'nav-button ' + (['reports', 'new', 'edit', 'detail'].includes(view) ? 'active' : '')}
+        <button className={'nav-button ' + (['reports', 'new-choice', 'ai-import', 'new', 'edit', 'detail'].includes(view) ? 'active' : '')}
           aria-label={t('reports')} title={sidebarCollapsed ? t('reports') : undefined}
           onClick={() => setView('reports')}>▤ <span>{t('reports')}</span></button>
       </nav>
       <button className={'settings-button nav-button ' + (view === 'settings' ? 'active' : '')}
         aria-label={t('settings')} title={sidebarCollapsed ? t('settings') : undefined}
-        onClick={() => setView('settings')}>⚙ <span>{t('settings')}</span></button>
+        onClick={() => { setSettingsReturnView(null); setView('settings'); }}>⚙ <span>{t('settings')}</span></button>
     </aside>
     <div className="content"><main className="page">
       {view === 'reports' && <div>
         <div className="page-head"><h1>{t('reports')}</h1><div className="page-actions">
           <button className="secondary sample-button" onClick={() => void addSamples()}>{t('addSamples')}</button>
-          <button className="primary" onClick={() => { setSelected(null); setView('new'); }}>{'+ ' + t('newReport')}</button>
+          <button className="primary" onClick={() => { setSelected(null); setImportedDraft(null); setImportText(''); setView('new-choice'); }}>{'+ ' + t('newReport')}</button>
         </div></div>
         <details className="filter-panel" open={filterOpen} onToggle={event => setFilterOpen(event.currentTarget.open)}>
           <summary>{t('filterReports')} {Object.entries(filters).some(([key, value]) => key !== 'project_id' && key !== 'oldest_first' && Boolean(value)) && <span className="filter-active">{t('active')}</span>}</summary>
@@ -377,9 +461,38 @@ export function App() {
             <span>{currentPage} / {pageCount}</span>
             <button className="secondary" type="button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t('next')}</button></div></div>}
       </div>}
+      {view === 'new-choice' && <div>
+        <button className="back" onClick={() => setView('reports')}>← {t('reports')}</button>
+        <div className="page-head"><h1>{t('newReport')}</h1></div>
+        <div className="creation-options">
+          <button type="button" onClick={() => { setImportedDraft(null); setView('new'); }}>
+            <strong>{t('form')}</strong><span>{t('formChoice')}</span>
+          </button>
+          <button type="button" onClick={() => setView('ai-import')}>
+            <strong>{t('aiImport')}</strong><span>{t('aiImportChoice')}</span>
+          </button>
+        </div>
+      </div>}
+      {view === 'ai-import' && <div>
+        <button className="back" onClick={() => setView('new-choice')}>← {t('newReport')}</button>
+        <div className="page-head"><h1>{t('aiImport')}</h1></div>
+        <form className="form-panel ai-import-panel" onSubmit={event => void generateDraft(event)}>
+          <div className="field"><label htmlFor="import-text">{t('pasteReport')}</label>
+            <textarea id="import-text" className="import-text" required maxLength={100000} autoFocus
+              placeholder={t('pasteReportPlaceholder')} value={importText} onChange={event => setImportText(event.target.value)} /></div>
+          <p className="field-hint">{t('aiPrivacy')}</p>
+          {hasAiToken === false && <div className="import-key-notice"><span>{settings.ai_provider === 'anthropic' ? t('anthropicTokenRequired') : t('tokenOptional')}</span>
+            <button className="secondary" type="button" onClick={() => { setSettingsReturnView('ai-import'); setView('settings'); }}>{t('openSettings')}</button></div>}
+          <div className="actions"><button className="secondary" type="button" onClick={() => setView('new-choice')}>{t('cancel')}</button>
+            <button className="primary" type="submit" disabled={importing || !importText.trim() || (settings.ai_provider === 'anthropic' && hasAiToken !== true)}>
+              {importing ? t('generatingDraft') : t('generateDraft')}
+            </button></div>
+        </form>
+      </div>}
       {(view === 'new' || view === 'edit') && <ReportForm key={view + ':' + (selected?.id ?? projectId)} initial={view === 'edit' ? selected : null}
+        draft={view === 'new' ? importedDraft : null}
         projectId={projectId} suggestions={availableTags} language={language}
-        onCancel={() => setView(view === 'edit' ? 'detail' : 'reports')} onSave={saveReport}
+        onCancel={() => setView(view === 'edit' ? 'detail' : importedDraft ? 'ai-import' : 'new-choice')} onSave={saveReport}
         onError={text => setMessage({ text, error: true })} />}
       {view === 'detail' && selected && <div>
         <button className="back" onClick={() => setView('reports')}>← {t('reports')}</button>
@@ -401,6 +514,7 @@ export function App() {
       {view === 'projects' && <ProjectsView projects={projects} language={language} selectedId={projectId}
         onCreate={createProject} onRename={renameProject} onDelete={deleteProject} onSelect={selectProject} />}
       {view === 'settings' && <div>
+        {settingsReturnView && <button className="back" type="button" onClick={() => { setView(settingsReturnView); setSettingsReturnView(null); }}>← {t('aiImport')}</button>}
         <div className="page-head"><h1>{t('settings')}</h1></div>
         <div className="settings-panel">
           <div className="setting-row"><div><h2>{t('theme')}</h2></div><div className="segmented">
@@ -409,6 +523,32 @@ export function App() {
           <div className="setting-row"><div><h2>{t('language')}</h2></div><select value={settings.language}
             onChange={event => void updateSettings({ ...settings, language: event.target.value as Language })}>
             <option value="en">{t('english')}</option><option value="zh-TW">{t('traditionalChinese')}</option></select></div>
+          <div className="setting-row ai-key-row"><div><h2>{t('aiProvider')}</h2>
+            <p className="setting-value">{t(aiProviderInput === 'anthropic' ? 'anthropicEndpointHint' : 'aiEndpointHint')}</p></div>
+            <form className="ai-config-form" onSubmit={event => void saveAiConfig(event)}>
+              <label htmlFor="ai-provider">{t('aiProvider')}</label>
+              <select id="ai-provider" value={aiProviderInput}
+                onChange={event => chooseAiProvider(event.target.value as AppSettings['ai_provider'])}>
+                <option value="openai-compatible">{t('openAiCompatible')}</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+              <label htmlFor="ai-endpoint">{t('aiEndpoint')}</label>
+              <input id="ai-endpoint" type="url" required value={aiEndpointInput}
+                placeholder={aiProviderInput === 'anthropic' ? 'https://api.anthropic.com/v1/messages' : 'https://api.together.ai/v1/chat/completions'}
+                onChange={event => setAiEndpointInput(event.target.value)} />
+              <label htmlFor="ai-model">{t('aiModel')}</label>
+              <input id="ai-model" required value={aiModelInput} placeholder={aiProviderInput === 'anthropic' ? 'claude-sonnet-4-6' : 'zai-org/GLM-5.3'}
+                onChange={event => setAiModelInput(event.target.value)} />
+              <div><button className="primary" type="submit" disabled={savingAiConfig}>{t('saveAiConfig')}</button></div>
+            </form></div>
+          <div className="setting-row ai-key-row"><div><h2>{t('aiToken')}</h2>
+            <p className="setting-value">{aiConfigPending ? t('saveEndpointFirst') : hasAiToken === null ? t('loading') : hasAiToken ? t('tokenStored') : t('tokenMissing')}</p></div>
+            <form className="api-key-form" onSubmit={event => void saveAiToken(event)}>
+              <input type="password" value={tokenInput} onChange={event => setTokenInput(event.target.value)}
+                aria-label={t('aiToken')} placeholder={t('tokenPlaceholder')} autoComplete="new-password" spellCheck={false} />
+              <div><button className="primary" type="submit" disabled={savingToken || !tokenInput.trim() || aiConfigPending}>{t('saveToken')}</button>
+                {hasAiToken && <button className="secondary" type="button" disabled={aiConfigPending} onClick={() => void removeAiToken()}>{t('removeToken')}</button>}</div>
+            </form></div>
           <div className="setting-row folder-row"><div><h2>{t('backupFolder')}</h2>
             <p className="setting-value">{settings.backup_folder || t('noFolder')}</p>
             {settings.backup_folder && <p className="setting-hint">{t('syncReady')}</p>}

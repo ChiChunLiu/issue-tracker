@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import type { AppSettings, BackupStatus, Project, Report, ReportFilters, ReportInput, ReportSummary } from './types';
+import type { AiReportDraft, AppSettings, BackupStatus, Project, Report, ReportFilters, ReportInput, ReportSummary } from './types';
 
 export const api = {
   listProjects: () => invoke<Project[]>('list_projects'),
@@ -19,6 +19,10 @@ export const api = {
   updateSettings: (settings: AppSettings) => invoke<AppSettings>('update_settings', { settings }),
   getBackupStatus: () => invoke<BackupStatus>('get_backup_status'),
   syncBackup: () => invoke<void>('sync_backup_now'),
+  hasAiToken: () => invoke<boolean>('has_ai_token'),
+  saveAiToken: (token: string) => invoke<void>('save_ai_token', { token }),
+  deleteAiToken: () => invoke<void>('delete_ai_token'),
+  generateAiReport: (text: string) => invoke<AiReportDraft>('generate_ai_report', { text }),
   chooseFolder: async () => {
     const result = await open({ directory: true, multiple: false });
     return typeof result === 'string' ? result : null;
