@@ -1,0 +1,1346 @@
+use rusqlite::{params, Connection, OptionalExtension, MAIN_DB};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use tauri::{Manager, State};
+
+struct AppState {
+    connection: Mutex<Connection>,
+    database_path: PathBuf,
+    backup_status: Mutex<BackupStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct BackupStatus {
+    last_synced_at: String,
+    last_error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct Project {
+    id: i64,
+    name: String,
+    report_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AppSettings {
+    theme: String,
+    language: String,
+    backup_folder: String,
+    selected_project_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportInput {
+    project_id: i64,
+    title: String,
+    source: String,
+    description: String,
+    note: String,
+    platform: String,
+    system_info: String,
+    app_version: String,
+    application_log: String,
+    reported_at: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ReportFilters {
+    project_id: i64,
+    title: String,
+    source: String,
+    description: String,
+    note: String,
+    platform: String,
+    system_info: String,
+    app_version: String,
+    application_log: String,
+    tag: String,
+    reported_from: String,
+    reported_to: String,
+    oldest_first: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportSummary {
+    id: i64,
+    project_id: i64,
+    title: String,
+    platform: String,
+    app_version: String,
+    reported_at: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
+    id: i64,
+    project_id: i64,
+    title: String,
+    source: String,
+    description: String,
+    note: String,
+    platform: String,
+    system_info: String,
+    app_version: String,
+    application_log: String,
+    reported_at: String,
+    tags: Vec<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+fn open_database(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    match version {
+        0 => connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE reports (
+               id INTEGER PRIMARY KEY,
+               title TEXT NOT NULL,
+               platform TEXT NOT NULL,
+               system_info TEXT NOT NULL DEFAULT '',
+               app_version TEXT NOT NULL DEFAULT '',
+               application_log TEXT NOT NULL DEFAULT '',
+               reported_at TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             CREATE TABLE report_tags (
+               report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+               tag TEXT NOT NULL COLLATE NOCASE,
+               PRIMARY KEY (report_id, tag)
+             );
+             CREATE INDEX reports_reported_at ON reports(reported_at);
+             CREATE INDEX report_tags_tag ON report_tags(tag);
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?,
+        1 => connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE reports ADD COLUMN platform TEXT NOT NULL DEFAULT '';
+             ALTER TABLE reports ADD COLUMN reported_at TEXT NOT NULL DEFAULT '';
+             UPDATE reports SET reported_at = created_at;
+             CREATE TABLE report_tags (
+               report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+               tag TEXT NOT NULL COLLATE NOCASE,
+               PRIMARY KEY (report_id, tag)
+             );
+             CREATE INDEX reports_reported_at ON reports(reported_at);
+             CREATE INDEX report_tags_tag ON report_tags(tag);
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?,
+        2 | 3 | 4 => (),
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    }
+    if version <= 2 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE projects (
+               id INTEGER PRIMARY KEY,
+               name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );
+             INSERT INTO projects (id, name) VALUES (1, 'Default project');
+             ALTER TABLE reports ADD COLUMN project_id INTEGER REFERENCES projects(id);
+             UPDATE reports SET project_id = 1;
+             CREATE INDEX reports_project_time ON reports(project_id, reported_at);
+             CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO app_settings (key, value) VALUES
+               ('theme', 'light'), ('language', 'en'), ('backup_folder', ''),
+               ('selected_project_id', '1');
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
+    if version <= 3 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE reports ADD COLUMN source TEXT NOT NULL DEFAULT '';
+             ALTER TABLE reports ADD COLUMN description TEXT NOT NULL DEFAULT '';
+             ALTER TABLE reports ADD COLUMN note TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version = 4;
+             COMMIT;",
+        )?;
+    }
+    Ok(connection)
+}
+
+fn normalize_tags(tags: &[String]) -> Result<Vec<String>, String> {
+    if tags.len() > 30 {
+        return Err("A report can have at most 30 tags.".to_owned());
+    }
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > 50 {
+            return Err("Each tag must be 50 characters or fewer.".to_owned());
+        }
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(tag))
+        {
+            normalized.push(tag.to_owned());
+        }
+    }
+    Ok(normalized)
+}
+
+fn validate(input: &ReportInput) -> Result<Vec<String>, String> {
+    if input.title.trim().is_empty() {
+        return Err("Title is required.".to_owned());
+    }
+    if input.title.chars().count() > 500 {
+        return Err("Title must be 500 characters or fewer.".to_owned());
+    }
+    if !matches!(input.platform.as_str(), "Linux" | "macOS" | "Windows") {
+        return Err("Choose Linux, macOS, or Windows.".to_owned());
+    }
+    if !matches!(
+        input.source.as_str(),
+        "" | "Slack" | "Reddit" | "Mail" | "Zendesk"
+    ) {
+        return Err("Choose a valid source.".to_owned());
+    }
+    if !is_utc_timestamp(&input.reported_at) {
+        return Err("Reported time must be a UTC timestamp.".to_owned());
+    }
+    normalize_tags(&input.tags)
+}
+
+fn is_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 24
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'.'
+        && bytes[23] == b'Z'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit())
+}
+
+fn read_tags(connection: &Connection, id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut query = connection
+        .prepare("SELECT tag FROM report_tags WHERE report_id = ?1 ORDER BY tag COLLATE NOCASE")?;
+    let tags = query
+        .query_map([id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(tags)
+}
+
+fn read_report(connection: &Connection, id: i64) -> rusqlite::Result<Option<Report>> {
+    let report = connection
+        .query_row(
+            "SELECT id, project_id, title, platform, system_info, app_version, application_log,
+                    reported_at, created_at, updated_at, source, description, note
+             FROM reports WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(Report {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    title: row.get(2)?,
+                    source: row.get(10)?,
+                    description: row.get(11)?,
+                    note: row.get(12)?,
+                    platform: row.get(3)?,
+                    system_info: row.get(4)?,
+                    app_version: row.get(5)?,
+                    application_log: row.get(6)?,
+                    reported_at: row.get(7)?,
+                    tags: Vec::new(),
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()?;
+    report
+        .map(|mut report| {
+            report.tags = read_tags(connection, id)?;
+            Ok(report)
+        })
+        .transpose()
+}
+
+fn write_tags(connection: &Connection, id: i64, tags: &[String]) -> rusqlite::Result<()> {
+    connection.execute("DELETE FROM report_tags WHERE report_id = ?1", [id])?;
+    for tag in tags {
+        connection.execute(
+            "INSERT INTO report_tags (report_id, tag) VALUES (?1, ?2)",
+            params![id, tag],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_report(connection: &mut Connection, input: ReportInput) -> Result<Report, String> {
+    let tags = validate(&input)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO reports
+               (project_id, title, platform, system_info, app_version, application_log, reported_at,
+                source, description, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                input.project_id,
+                input.title.trim(),
+                input.platform,
+                input.system_info,
+                input.app_version,
+                input.application_log,
+                input.reported_at,
+                input.source,
+                input.description,
+                input.note
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let id = transaction.last_insert_rowid();
+    write_tags(&transaction, id, &tags).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    read_report(connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "The new report could not be loaded.".to_owned())
+}
+
+fn change_report(
+    connection: &mut Connection,
+    id: i64,
+    input: ReportInput,
+) -> Result<Report, String> {
+    let tags = validate(&input)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE reports SET project_id = ?1, title = ?2, platform = ?3, system_info = ?4,
+              app_version = ?5, application_log = ?6, reported_at = ?7,
+              source = ?8, description = ?9, note = ?10,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?11",
+            params![
+                input.project_id,
+                input.title.trim(),
+                input.platform,
+                input.system_info,
+                input.app_version,
+                input.application_log,
+                input.reported_at,
+                input.source,
+                input.description,
+                input.note,
+                id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Report not found.".to_owned());
+    }
+    write_tags(&transaction, id, &tags).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    read_report(connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Report not found.".to_owned())
+}
+
+fn insert_sample_reports(connection: &mut Connection, project_id: i64) -> rusqlite::Result<usize> {
+    let samples: [(&str, &str, &str, &str, &str, i64, &[&str]); 10] = [
+        (
+            "Window goes blank after sleep",
+            "Windows",
+            "Windows 11 · Intel Core i7",
+            "2.8.2",
+            "[resume] renderer surface unavailable",
+            1,
+            &["sample", "display"],
+        ),
+        (
+            "App freezes when monitor disconnects",
+            "macOS",
+            "macOS 15.4 · Apple M3",
+            "2.8.2",
+            "[display] external monitor removed\n[renderer] heartbeat timeout",
+            3,
+            &["sample", "freeze", "display"],
+        ),
+        (
+            "Tray icon missing after login",
+            "Linux",
+            "Ubuntu 24.04 · AMD Ryzen 7",
+            "2.8.1",
+            "[tray] registration timed out",
+            6,
+            &["sample", "tray"],
+        ),
+        (
+            "Update download stops at 90 percent",
+            "Windows",
+            "Windows 11 ARM · Snapdragon X",
+            "2.8.1",
+            "[updater] checksum mismatch",
+            10,
+            &["sample", "update"],
+        ),
+        (
+            "Keyboard shortcut stops responding",
+            "macOS",
+            "macOS 15.3 · Apple M2",
+            "2.8.0",
+            "[shortcut] accelerator registration failed",
+            20,
+            &["sample", "keyboard"],
+        ),
+        (
+            "High CPU usage while idle",
+            "Linux",
+            "Fedora 42 · Intel Core i5",
+            "2.8.2",
+            "[sync] polling loop exceeded expected frequency",
+            30,
+            &["sample", "performance"],
+        ),
+        (
+            "Cannot paste into editor",
+            "Windows",
+            "Windows 10 · AMD Ryzen 5",
+            "2.7.9",
+            "[clipboard] read denied",
+            40,
+            &["sample", "editor"],
+        ),
+        (
+            "Settings reset after restart",
+            "macOS",
+            "macOS 14.7 · Apple M1",
+            "2.8.0",
+            "[settings] failed to flush preferences",
+            52,
+            &["sample", "settings"],
+        ),
+        (
+            "Notification appears twice",
+            "Linux",
+            "Debian 13 · Intel Core i7",
+            "2.8.2",
+            "[notifications] duplicate listener attached",
+            72,
+            &["sample", "notifications"],
+        ),
+        (
+            "App crashes while opening a large file",
+            "Windows",
+            "Windows 11 · Intel Core i9",
+            "2.8.2",
+            "[file] allocation failed: 512 MB",
+            96,
+            &["sample", "crash", "files"],
+        ),
+    ];
+    let transaction = connection.transaction()?;
+    for (title, platform, system_info, app_version, application_log, hours_ago, tags) in samples {
+        let modifier = format!("-{hours_ago} hours");
+        transaction.execute(
+            "INSERT INTO reports
+               (project_id, title, platform, system_info, app_version, application_log, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?7))",
+            params![
+                project_id,
+                title,
+                platform,
+                system_info,
+                app_version,
+                application_log,
+                modifier
+            ],
+        )?;
+        let id = transaction.last_insert_rowid();
+        for tag in tags {
+            transaction.execute(
+                "INSERT INTO report_tags (report_id, tag) VALUES (?1, ?2)",
+                params![id, tag],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(samples.len())
+}
+
+fn all_tags(connection: &Connection, project_id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut query = connection.prepare(
+        "SELECT DISTINCT t.tag FROM report_tags t JOIN reports r ON r.id = t.report_id
+         WHERE r.project_id = ?1 ORDER BY t.tag COLLATE NOCASE",
+    )?;
+    let tags = query
+        .query_map([project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(tags)
+}
+
+fn tags_by_report(connection: &Connection) -> rusqlite::Result<HashMap<i64, Vec<String>>> {
+    let mut tags = HashMap::<i64, Vec<String>>::new();
+    let mut query =
+        connection.prepare("SELECT report_id, tag FROM report_tags ORDER BY tag COLLATE NOCASE")?;
+    let rows = query.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, tag) = row?;
+        tags.entry(id).or_default().push(tag);
+    }
+    Ok(tags)
+}
+
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.to_lowercase();
+    if haystack.contains(&needle) {
+        return true;
+    }
+    let words: Vec<&str> = haystack
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    needle.split_whitespace().all(|term| {
+        let allowed = if term.chars().count() >= 7 {
+            2
+        } else if term.chars().count() >= 3 {
+            1
+        } else {
+            0
+        };
+        words
+            .iter()
+            .any(|word| edit_distance_within(word, term, allowed))
+    })
+}
+
+fn edit_distance_within(a: &str, b: &str, maximum: usize) -> bool {
+    if a == b {
+        return true;
+    }
+    if maximum == 0 {
+        return false;
+    }
+    let left: Vec<char> = a.chars().collect();
+    let right: Vec<char> = b.chars().collect();
+    if left.len() == right.len() {
+        let different: Vec<usize> = left
+            .iter()
+            .zip(&right)
+            .enumerate()
+            .filter_map(|(index, (a, b))| (a != b).then_some(index))
+            .collect();
+        if different.len() == 2
+            && different[1] == different[0] + 1
+            && left[different[0]] == right[different[1]]
+            && left[different[1]] == right[different[0]]
+        {
+            return true;
+        }
+    }
+    if left.len().abs_diff(right.len()) > maximum || left.len() > 100 || right.len() > 100 {
+        return false;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (i, char_a) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, char_b) in right.iter().enumerate() {
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + usize::from(char_a != char_b));
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()] <= maximum
+}
+
+fn query_reports(
+    connection: &Connection,
+    filters: &ReportFilters,
+) -> rusqlite::Result<Vec<ReportSummary>> {
+    let tags = tags_by_report(connection)?;
+    let mut query = connection.prepare(
+        "SELECT id, project_id, title, platform, system_info, app_version,
+                CASE WHEN ?1 = '' THEN '' ELSE application_log END, reported_at,
+                source, description, note
+         FROM reports ORDER BY reported_at DESC, id DESC",
+    )?;
+    let rows = query.query_map([&filters.application_log], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+        ))
+    })?;
+    let mut reports = Vec::new();
+    for row in rows {
+        let (
+            id,
+            project_id,
+            title,
+            platform,
+            system_info,
+            app_version,
+            application_log,
+            reported_at,
+            source,
+            description,
+            note,
+        ) = row?;
+        let report_tags = tags.get(&id).cloned().unwrap_or_default();
+        if filters.project_id != 0 && filters.project_id != project_id
+            || !filters.platform.is_empty() && filters.platform != platform
+            || !filters.reported_from.is_empty() && reported_at < filters.reported_from
+            || !filters.reported_to.is_empty() && reported_at > filters.reported_to
+            || !filters.tag.is_empty()
+                && !report_tags
+                    .iter()
+                    .any(|tag| tag.eq_ignore_ascii_case(&filters.tag))
+            || !fuzzy_match(&title, &filters.title)
+            || !fuzzy_match(&system_info, &filters.system_info)
+            || !fuzzy_match(&app_version, &filters.app_version)
+            || !fuzzy_match(&application_log, &filters.application_log)
+            || !filters.source.is_empty() && source != filters.source
+            || !fuzzy_match(&description, &filters.description)
+            || !fuzzy_match(&note, &filters.note)
+        {
+            continue;
+        }
+        reports.push(ReportSummary {
+            id,
+            project_id,
+            title,
+            platform,
+            app_version,
+            reported_at,
+            tags: report_tags,
+        });
+    }
+    if filters.oldest_first {
+        reports.reverse();
+    }
+    Ok(reports)
+}
+
+fn read_setting(connection: &Connection, key: &str) -> rusqlite::Result<String> {
+    connection.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )
+}
+
+fn write_setting(connection: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn read_settings(connection: &Connection) -> rusqlite::Result<AppSettings> {
+    Ok(AppSettings {
+        theme: read_setting(connection, "theme")?,
+        language: read_setting(connection, "language")?,
+        backup_folder: read_setting(connection, "backup_folder")?,
+        selected_project_id: read_setting(connection, "selected_project_id")?
+            .parse()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
+}
+
+fn project_exists(connection: &Connection, id: i64) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [id],
+        |row| row.get(0),
+    )
+}
+
+fn read_project(connection: &Connection, id: i64) -> rusqlite::Result<Option<Project>> {
+    connection
+        .query_row(
+            "SELECT p.id, p.name, COUNT(r.id) FROM projects p
+         LEFT JOIN reports r ON r.project_id = p.id WHERE p.id = ?1 GROUP BY p.id",
+            [id],
+            |row| {
+                Ok(Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    report_count: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}
+
+fn projects(connection: &Connection) -> rusqlite::Result<Vec<Project>> {
+    let mut query = connection.prepare(
+        "SELECT p.id, p.name, COUNT(r.id) FROM projects p
+         LEFT JOIN reports r ON r.project_id = p.id
+         GROUP BY p.id ORDER BY p.created_at, p.id",
+    )?;
+    let rows = query.query_map([], |row| {
+        Ok(Project {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            report_count: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn validate_project_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err("Project name must be 1–100 characters.".to_owned());
+    }
+    Ok(name)
+}
+
+fn create_project_record(connection: &Connection, name: &str) -> Result<Project, String> {
+    let name = validate_project_name(name)?;
+    connection
+        .execute("INSERT INTO projects (name) VALUES (?1)", [name])
+        .map_err(|error| error.to_string())?;
+    read_project(connection, connection.last_insert_rowid())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Project not found after creation.".to_owned())
+}
+
+fn rename_project_record(connection: &Connection, id: i64, name: &str) -> Result<Project, String> {
+    let name = validate_project_name(name)?;
+    let changed = connection
+        .execute(
+            "UPDATE projects SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Project not found.".to_owned());
+    }
+    read_project(connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Project not found.".to_owned())
+}
+
+fn delete_project_record(connection: &Connection, id: i64) -> Result<(), String> {
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if count <= 1 {
+        return Err("Keep at least one project.".to_owned());
+    }
+    let project = read_project(connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Project not found.".to_owned())?;
+    if project.report_count > 0 {
+        return Err("Move or delete its reports before deleting this project.".to_owned());
+    }
+    connection
+        .execute("DELETE FROM projects WHERE id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    let settings = read_settings(connection).map_err(|error| error.to_string())?;
+    if settings.selected_project_id == id {
+        let replacement: i64 = connection
+            .query_row("SELECT id FROM projects ORDER BY id LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
+        write_setting(connection, "selected_project_id", &replacement.to_string())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn sync_backup_if_configured(state: &AppState, connection: &Connection) -> Result<(), String> {
+    let folder = read_setting(connection, "backup_folder").map_err(|error| error.to_string())?;
+    if folder.is_empty() {
+        return Ok(());
+    }
+    let destination = PathBuf::from(folder).join("issue-tracker-backup.db");
+    let outcome = connection
+        .backup(
+            MAIN_DB,
+            &destination,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
+        .map_err(|error| error.to_string());
+    let mut status = state
+        .backup_status
+        .lock()
+        .map_err(|error| error.to_string())?;
+    match outcome {
+        Ok(()) => {
+            status.last_synced_at = connection
+                .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|error| error.to_string())?;
+            status.last_error.clear();
+            Ok(())
+        }
+        Err(error) => {
+            status.last_error = error.clone();
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn list_reports(
+    filters: ReportFilters,
+    state: State<'_, AppState>,
+) -> Result<Vec<ReportSummary>, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    query_reports(&connection, &filters).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    projects(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_project(name: String, state: State<'_, AppState>) -> Result<Project, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let project = create_project_record(&connection, &name)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(project)
+}
+
+#[tauri::command]
+fn rename_project(id: i64, name: String, state: State<'_, AppState>) -> Result<Project, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let project = rename_project_record(&connection, id, &name)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(project)
+}
+
+#[tauri::command]
+fn delete_project(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    delete_project_record(&connection, id)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(())
+}
+
+#[tauri::command]
+fn select_project(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    if !project_exists(&connection, id).map_err(|error| error.to_string())? {
+        return Err("Project not found.".to_owned());
+    }
+    write_setting(&connection, "selected_project_id", &id.to_string())
+        .map_err(|error| error.to_string())?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    read_settings(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_settings(
+    settings: AppSettings,
+    state: State<'_, AppState>,
+) -> Result<AppSettings, String> {
+    if !matches!(settings.theme.as_str(), "light" | "dark")
+        || !matches!(settings.language.as_str(), "en" | "zh-TW")
+    {
+        return Err("Invalid theme or language.".to_owned());
+    }
+    if !settings.backup_folder.is_empty() && !PathBuf::from(&settings.backup_folder).is_dir() {
+        return Err("The backup folder is unavailable.".to_owned());
+    }
+    let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
+    if !project_exists(&connection, settings.selected_project_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Project not found.".to_owned());
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    write_setting(&transaction, "theme", &settings.theme).map_err(|error| error.to_string())?;
+    write_setting(&transaction, "language", &settings.language)
+        .map_err(|error| error.to_string())?;
+    write_setting(&transaction, "backup_folder", &settings.backup_folder)
+        .map_err(|error| error.to_string())?;
+    write_setting(
+        &transaction,
+        "selected_project_id",
+        &settings.selected_project_id.to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    read_settings(&connection).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_backup_status(state: State<'_, AppState>) -> Result<BackupStatus, String> {
+    state
+        .backup_status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_backup_now(state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let folder = read_setting(&connection, "backup_folder").map_err(|error| error.to_string())?;
+    if folder.is_empty() {
+        return Err("Choose a backup folder first.".to_owned());
+    }
+    sync_backup_if_configured(&state, &connection)
+}
+
+#[tauri::command]
+fn list_tags(project_id: i64, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    all_tags(&connection, project_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn seed_sample_reports(project_id: i64, state: State<'_, AppState>) -> Result<usize, String> {
+    let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let count =
+        insert_sample_reports(&mut connection, project_id).map_err(|error| error.to_string())?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(count)
+}
+
+#[tauri::command]
+fn get_report(id: i64, state: State<'_, AppState>) -> Result<Report, String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    read_report(&connection, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Report not found.".to_owned())
+}
+
+#[tauri::command]
+fn create_report(input: ReportInput, state: State<'_, AppState>) -> Result<Report, String> {
+    let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let report = insert_report(&mut connection, input)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(report)
+}
+
+#[tauri::command]
+fn update_report(
+    id: i64,
+    input: ReportInput,
+    state: State<'_, AppState>,
+) -> Result<Report, String> {
+    let mut connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let report = change_report(&mut connection, id, input)?;
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(report)
+}
+
+#[tauri::command]
+fn delete_report(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    let changed = connection
+        .execute("DELETE FROM reports WHERE id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Report not found.".to_owned());
+    }
+    let _ = sync_backup_if_configured(&state, &connection);
+    Ok(())
+}
+
+#[tauri::command]
+fn backup_database(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let destination = PathBuf::from(path);
+    if destination.as_os_str().is_empty() || destination == state.database_path {
+        return Err("Choose a different backup file.".to_owned());
+    }
+    let connection = state.connection.lock().map_err(|error| error.to_string())?;
+    connection
+        .backup(
+            MAIN_DB,
+            &destination,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let builder = tauri::Builder::default();
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+    builder
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let database_path = data_dir.join("reports.db");
+            let connection = open_database(&database_path)?;
+            app.manage(AppState {
+                connection: Mutex::new(connection),
+                database_path,
+                backup_status: Mutex::new(BackupStatus::default()),
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_reports,
+            list_projects,
+            create_project,
+            rename_project,
+            delete_project,
+            select_project,
+            get_settings,
+            update_settings,
+            get_backup_status,
+            sync_backup_now,
+            list_tags,
+            seed_sample_reports,
+            get_report,
+            create_report,
+            update_report,
+            delete_report,
+            backup_database
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running issue tracker");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(title: &str) -> ReportInput {
+        ReportInput {
+            project_id: 1,
+            title: title.to_owned(),
+            source: "Slack".to_owned(),
+            description: "Repro after waking from sleep".to_owned(),
+            note: "Needs triage".to_owned(),
+            platform: "macOS".to_owned(),
+            system_info: "macOS 15.4\nApple M3".to_owned(),
+            app_version: "2.8.2".to_owned(),
+            application_log: "a log\nwith lines".to_owned(),
+            reported_at: "2026-11-22T10:00:00.000Z".to_owned(),
+            tags: vec!["Display".to_owned(), "freeze".to_owned()],
+        }
+    }
+
+    #[test]
+    fn reports_round_trip_and_filter() {
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        let created = insert_report(&mut connection, input("Freeze on display")).unwrap();
+        assert_eq!(created.tags, vec!["Display", "freeze"]);
+        assert_eq!(created.platform, "macOS");
+        assert_eq!(created.source, "Slack");
+        assert_eq!(created.description, "Repro after waking from sleep");
+        assert_eq!(created.note, "Needs triage");
+        let matches = query_reports(
+            &connection,
+            &ReportFilters {
+                title: "freze".to_owned(),
+                tag: "display".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, created.id);
+        assert_eq!(
+            query_reports(
+                &connection,
+                &ReportFilters {
+                    source: "Slack".to_owned(),
+                    description: "waking".to_owned(),
+                    note: "triage".to_owned(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        assert!(query_reports(
+            &connection,
+            &ReportFilters {
+                platform: "Linux".to_owned(),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            query_reports(
+                &connection,
+                &ReportFilters {
+                    application_log: "lgo".to_owned(),
+                    system_info: "Aple".to_owned(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        let mut updated = input("Updated");
+        updated.tags = vec!["Crash".to_owned()];
+        let updated = change_report(&mut connection, created.id, updated).unwrap();
+        assert_eq!(updated.tags, vec!["Crash"]);
+    }
+
+    #[test]
+    fn sorting_and_time_filter_use_reported_time() {
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        let first = insert_report(&mut connection, input("Earlier")).unwrap();
+        let mut later = input("Later");
+        later.reported_at = "2026-11-23T10:00:00.000Z".to_owned();
+        let second = insert_report(&mut connection, later).unwrap();
+        let newest = query_reports(&connection, &ReportFilters::default()).unwrap();
+        assert_eq!(newest[0].id, second.id);
+        let oldest = query_reports(
+            &connection,
+            &ReportFilters {
+                oldest_first: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(oldest[0].id, first.id);
+        let filtered = query_reports(
+            &connection,
+            &ReportFilters {
+                reported_from: "2026-11-23T00:00:00.000Z".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, second.id);
+    }
+
+    #[test]
+    fn v1_reports_migrate_without_losing_data() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("issue-tracker-migration-{unique}"));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("reports.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE reports (
+                  id INTEGER PRIMARY KEY, title TEXT NOT NULL, system_info TEXT NOT NULL DEFAULT '',
+                  app_version TEXT NOT NULL DEFAULT '', application_log TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO reports VALUES (1, 'Old report', 'macOS', '2.8.2', 'old log',
+                   '2026-11-01T12:00:00.000Z', '2026-11-01T12:00:00.000Z');
+                 PRAGMA user_version = 1;",
+                )
+                .unwrap();
+        }
+        let connection = open_database(&path).unwrap();
+        let report = read_report(&connection, 1).unwrap().unwrap();
+        assert_eq!(report.title, "Old report");
+        assert_eq!(report.reported_at, report.created_at);
+        assert_eq!(report.platform, "");
+        assert_eq!(report.source, "");
+        assert_eq!(report.description, "");
+        assert_eq!(report.note, "");
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn blank_title_and_invalid_platform_are_rejected() {
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        assert!(insert_report(&mut connection, input("  ")).is_err());
+        let mut invalid = input("Report");
+        invalid.platform = "Other".to_owned();
+        assert!(insert_report(&mut connection, invalid).is_err());
+    }
+
+    #[test]
+    fn backup_keeps_tags_and_reported_time() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("issue-tracker-backup-{unique}"));
+        std::fs::create_dir(&directory).unwrap();
+        let backup_path = directory.join("backup.db");
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        let created = insert_report(&mut connection, input("Backed up")).unwrap();
+        connection
+            .backup(
+                MAIN_DB,
+                &backup_path,
+                None::<fn(rusqlite::backup::Progress)>,
+            )
+            .unwrap();
+        let backup = open_database(&backup_path).unwrap();
+        let restored = read_report(&backup, created.id).unwrap().unwrap();
+        assert_eq!(restored.tags, vec!["Display", "freeze"]);
+        assert_eq!(restored.reported_at, created.reported_at);
+        drop(backup);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sample_button_adds_ten_filterable_reports() {
+        let mut connection = open_database(std::path::Path::new(":memory:")).unwrap();
+        assert_eq!(insert_sample_reports(&mut connection, 1).unwrap(), 10);
+        let reports = query_reports(
+            &connection,
+            &ReportFilters {
+                tag: "sample".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 10);
+        assert!(reports.iter().any(|report| report.platform == "Linux"));
+        assert!(reports.iter().any(|report| report.platform == "macOS"));
+        assert!(reports.iter().any(|report| report.platform == "Windows"));
+    }
+
+    #[test]
+    fn projects_scope_reports_tags_and_synced_backup() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("issue-tracker-projects-{unique}"));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("reports.db");
+        let mut connection = open_database(&path).unwrap();
+        let second = create_project_record(&connection, "Second app").unwrap();
+        let first_report = insert_report(&mut connection, input("First app issue")).unwrap();
+        let mut other_input = input("Second app issue");
+        other_input.project_id = second.id;
+        other_input.tags = vec!["second-only".to_owned()];
+        let second_report = insert_report(&mut connection, other_input).unwrap();
+        let first_scope = query_reports(
+            &connection,
+            &ReportFilters {
+                project_id: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let second_scope = query_reports(
+            &connection,
+            &ReportFilters {
+                project_id: second.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            first_scope
+                .iter()
+                .map(|report| report.id)
+                .collect::<Vec<_>>(),
+            vec![first_report.id]
+        );
+        assert_eq!(
+            second_scope
+                .iter()
+                .map(|report| report.id)
+                .collect::<Vec<_>>(),
+            vec![second_report.id]
+        );
+        assert!(!all_tags(&connection, 1)
+            .unwrap()
+            .contains(&"second-only".to_owned()));
+        assert_eq!(
+            read_project(&connection, second.id)
+                .unwrap()
+                .unwrap()
+                .report_count,
+            1
+        );
+        assert!(delete_project_record(&connection, second.id).is_err());
+
+        write_setting(&connection, "theme", "dark").unwrap();
+        write_setting(&connection, "language", "zh-TW").unwrap();
+        write_setting(&connection, "backup_folder", directory.to_str().unwrap()).unwrap();
+        let state = AppState {
+            connection: Mutex::new(connection),
+            database_path: path,
+            backup_status: Mutex::new(BackupStatus::default()),
+        };
+        sync_backup_if_configured(&state, &state.connection.lock().unwrap()).unwrap();
+        assert!(!state
+            .backup_status
+            .lock()
+            .unwrap()
+            .last_synced_at
+            .is_empty());
+        let backup = open_database(&directory.join("issue-tracker-backup.db")).unwrap();
+        assert_eq!(read_settings(&backup).unwrap().theme, "dark");
+        assert_eq!(read_settings(&backup).unwrap().language, "zh-TW");
+        assert_eq!(projects(&backup).unwrap().len(), 2);
+        assert_eq!(
+            read_report(&backup, second_report.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            second.id
+        );
+        drop(backup);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "issue_tracker"
+version = "0.1.0"
+description = "A local issue report tracker"
+edition = "2021"
+
+[lib]
+name = "issue_tracker_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+rusqlite = { version = "0.43", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
