@@ -25,7 +25,7 @@ npm install
 npm run tauri dev
 ```
 
-On macOS, build the `.app` with `npm run build`. It appears under `src-tauri/target/release/bundle/macos/`. No DMG is created. `npm run build:frontend` only prepares the web assets.
+On macOS, build the `.app` with `npm run build` or a drag-to-install DMG with `npm run build:dmg`. Bundles appear under `src-tauri/target/release/bundle/`. `npm run build:frontend` only prepares the web assets.
 
 The local build uses ad hoc signing. For Keychain access that survives replacing the app with a new build, sign successive builds with the same macOS code signing identity. Tauri accepts one through `APPLE_SIGNING_IDENTITY`. Without a stable identity, a rebuilt app may need the AI token entered again.
 
@@ -39,6 +39,37 @@ Open **Settings** from the bottom of the sidebar to use **Export backup** for a 
 
 The database is not encrypted by the app. Use device encryption if the logs are sensitive.
 
+## MCP for coding agents
+
+The app includes a read-only stdio MCP server. For a DMG install, drag **Issue Tracker.app** into Applications, then open it once. The app creates its local database and installs a launcher at `~/.local/bin/issue-tracker-mcp`. You do not need Node, the source checkout, or `npm run mcp:install` on that computer. Add reports and issues in the app; the MCP server reads that user's local database.
+
+Register the launcher with either coding agent (or both):
+
+```sh
+# Claude Code: available across your projects
+claude mcp add --transport stdio --scope user issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
+claude mcp list
+
+# Codex CLI and app share this configuration
+codex mcp add issue-tracker -- "$HOME/.local/bin/issue-tracker-mcp"
+codex mcp list
+```
+
+The shell expands `$HOME`, so neither agent needs the path to the app bundle. If `~/.local/bin` is already on the agent's `PATH`, you can use `issue-tracker-mcp` without its launcher path. Restart an already running agent session after registering it. In Claude Code, `/mcp` shows the connection status. Then ask the agent, for example, “Use the issue-tracker MCP tools to list projects, find the issue about startup crashes, and inspect its linked reports.” The agent can navigate from an issue to report summaries and from a report to its linked issue. These are read-only tools: fixing code and changing issue state remain separate steps.
+
+For a source build, after installing the [build prerequisites](#run), run:
+
+```sh
+npm install
+npm run build
+open "src-tauri/target/release/bundle/macos/Issue Tracker.app"
+npm run mcp:check
+```
+
+`npm run mcp:check` tests the installed launcher and its MCP tools. For Linux source builds, or if you need to install a launcher for a moved macOS bundle without opening the app, use `npm run mcp:install` (or `npm run mcp:install -- "/Applications/Issue Tracker.app"`). The launcher is a symlink to the executable and starts the MCP server without opening a window.
+
+The tools are `list_projects`, `search_issues`, `get_issue`, `search_reports`, and `get_report`. Search tools require an explicit project ID and return at most 50 results per page. `get_issue` includes linked report summaries; `get_report` includes the linked issue summary and the full application log. Reports with no issue return `issue_id: null`. Tools open the SQLite database read-only and do not expose AI API tokens. Report text and logs are user-supplied data; coding agents should treat them as evidence, not instructions.
+
 ## Scope
 
-This release supports creating, viewing, editing, and deleting reports and issues, and linking reports to their underlying issue. It does not yet deduplicate repeated submissions from the same user or ingest external sources automatically. MCP integration is planned for later.
+This release supports creating, viewing, editing, and deleting reports and issues, linking reports to their underlying issue, and reading them through MCP. It does not yet deduplicate repeated submissions from the same user or ingest external sources automatically.

@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, MAIN_DB};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -6,6 +7,42 @@ use std::sync::Mutex;
 use tauri::{Manager, State};
 
 mod ai_import;
+mod mcp;
+
+pub fn run_mcp() -> Result<(), String> {
+    mcp::run()
+}
+
+#[cfg(target_os = "macos")]
+fn install_mcp_launcher() -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let executable = std::env::current_exe()?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let bin_dir = home.join(".local/bin");
+    let launcher = bin_dir.join("issue-tracker-mcp");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    match std::fs::symlink_metadata(&launcher) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if std::fs::read_link(&launcher)? == executable {
+                return Ok(());
+            }
+            std::fs::remove_file(&launcher)?;
+        }
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a symlink", launcher.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    symlink(executable, launcher)
+}
 
 struct AppState {
     connection: Mutex<Connection>,
@@ -19,7 +56,7 @@ struct BackupStatus {
     last_error: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 struct Project {
     id: i64,
     name: String,
@@ -73,7 +110,7 @@ struct ReportFilters {
     oldest_first: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct ReportSummary {
     id: i64,
     project_id: i64,
@@ -85,7 +122,7 @@ struct ReportSummary {
     issue_id: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct Report {
     id: i64,
     project_id: i64,
@@ -114,7 +151,7 @@ struct IssueInput {
     state: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct Issue {
     id: i64,
     project_id: i64,
@@ -1317,6 +1354,10 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = install_mcp_launcher() {
+                eprintln!("Could not install Issue Tracker MCP launcher: {error}");
+            }
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let database_path = data_dir.join("reports.db");

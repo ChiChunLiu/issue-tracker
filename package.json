@@ -5,7 +5,10 @@
   "version": "0.1.0",
   "scripts": {
     "build": "tauri build --bundles app",
+    "build:dmg": "tauri build --bundles dmg",
     "build:frontend": "tsc --noEmit && vite build",
+    "mcp:install": "node scripts/install-mcp-command.mjs",
+    "mcp:check": "node scripts/check-mcp.mjs",
     "dev": "vite",
     "tauri": "tauri"
   },
